@@ -24,6 +24,14 @@ import numpy as np
 from dotenv import load_dotenv
 load_dotenv()
 
+# Import historical data integrator
+try:
+    from app.data.historical_integrator import HistoricalDataIntegrator
+    HISTORICAL_AVAILABLE = True
+except ImportError:
+    HISTORICAL_AVAILABLE = False
+    logging.warning("Historical data integrator not available - using API only")
+
 logger = logging.getLogger("data_pipeline")
 logger.setLevel(logging.INFO)
 
@@ -44,8 +52,17 @@ class DataPipeline:
     DIFFERENTIAL_THRESHOLD = 5.0  # <5% ownership = differential
     PREMIUM_THRESHOLD = 10.0  # £10m+ = premium
     
-    def __init__(self, config: Dict[str, Any], fpl_client=None, understat_client=None):
-        """Initialize pipeline with configuration and clients."""
+    def __init__(self, config: Dict[str, Any], fpl_client=None, understat_client=None, use_historical_data: bool = True,  historical_cache_dir: str = "data/cache/historical"):
+        """
+        Initialize pipeline with configuration and clients.
+        
+        Args:
+            config: Configuration dictionary
+            fpl_client: FPL API client
+            understat_client: Understat client (optional)
+            use_historical_data: Whether to use external historical data
+            historical_cache_dir: Directory for historical data cache
+        """
         self.config = config
         self.fpl = fpl_client
         self.under = understat_client
@@ -68,6 +85,23 @@ class DataPipeline:
             "Chelsea": ["Pochettino"],
             "Liverpool": ["Klopp"],
         }
+        
+        # Historical data integration
+        self.use_historical_data = use_historical_data and HISTORICAL_AVAILABLE
+        self.historical_integrator = None
+        
+        if self.use_historical_data:
+            try:
+                self.historical_integrator = HistoricalDataIntegrator(
+                    cache_dir=historical_cache_dir,
+                    current_season="2024-25"
+                )
+                logger.info("✅ Historical data integration enabled")
+            except Exception as e:
+                logger.warning(f"⚠️ Historical data integration failed: {e}")
+                self.use_historical_data = False
+        else:
+            logger.info("ℹ️ Using FPL API only (no external historical data)")
     
     def fetch_bootstrap(self) -> Dict[str, Any]:
         """Fetches and caches static FPL bootstrap data."""
@@ -835,25 +869,156 @@ class DataPipeline:
             "differential_count": differential_count,
             "captain_eo": squad[squad["id"] == captain_id]["eo"].iloc[0] if not squad[squad["id"] == captain_id].empty else 0
         }
+        
+    # ==================== ENHANCED TRAINING DATA METHODS ====================
     
-    def build_train_features(self, season: str = "2024", rolling_window: int = 4) -> pd.DataFrame:
-        """Build training features from player histories with comprehensive validation features."""
+    def build_train_features(
+        self, 
+        season: str = "2024", 
+        rolling_window: int = 4,
+        use_multi_season: bool = True,
+        seasons: List[str] = None
+    ) -> pd.DataFrame:
+        """
+        Build training features with HISTORICAL DATA INTEGRATION.
+        
+        This method now uses three strategies in priority order:
+        1. External historical data (Vaastav's dataset) - BEST
+        2. FPL API enriched with historical ownership
+        3. FPL API with synthetic ownership (fallback)
+        
+        Args:
+            season: Current season (e.g., "2024")
+            rolling_window: Rolling window for features
+            use_multi_season: Whether to use multiple seasons
+            seasons: Specific seasons to include
+        
+        Returns:
+            DataFrame with comprehensive training features
+        """
+        logger.info("=" * 80)
+        logger.info("🔧 BUILDING TRAINING FEATURES WITH HISTORICAL DATA")
+        logger.info("=" * 80)
+        
+        # STRATEGY 1: Use external historical data (PREFERRED)
+        if self.use_historical_data and self.historical_integrator:
+            logger.info("📊 Strategy 1: Using external historical data (Vaastav)")
+            
+            try:
+                if use_multi_season:
+                    # Load multiple seasons for better training
+                    if seasons is None:
+                        seasons = ["2022-23", "2023-24", "2024-25"]
+                    
+                    logger.info(f"   Loading seasons: {seasons}")
+                    df = self.historical_integrator.get_multi_season_data(
+                        seasons=seasons,
+                        min_gameweeks=5,
+                        include_current_season=True
+                    )
+                else:
+                    # Single season
+                    df = self.historical_integrator.get_merged_gameweek_data(
+                        season=f"{season}-{int(season[-2:])+1}"
+                    )
+                
+                if not df.empty:
+                    # Prepare for training
+                    df = self.historical_integrator.prepare_training_features(df)
+                    
+                    # Validate data quality
+                    metrics = self.historical_integrator.validate_data_quality(df)
+                    
+                    logger.info(f"✅ Historical data loaded: {len(df)} records")
+                    logger.info(f"   Unique players: {metrics['unique_players']:,}")
+                    logger.info(f"   Gameweeks: {metrics['gameweeks_covered']}")
+                    logger.info(f"   Has ownership: {metrics['has_ownership']}")
+                    
+                    if metrics["warnings"]:
+                        logger.warning(f"   ⚠️ {len(metrics['warnings'])} warnings")
+                    
+                    # Enrich with additional features
+                    df = self._enrich_training_features(df)
+                    
+                    return df
+                else:
+                    logger.warning("   ⚠️ Historical data empty - falling back to Strategy 2")
+            
+            except Exception as e:
+                logger.warning(f"   ⚠️ Historical data failed: {e}")
+                logger.info("   Falling back to Strategy 2")
+        
+        # STRATEGY 2: FPL API enriched with historical ownership
+        logger.info("📊 Strategy 2: Using FPL API + historical enrichment")
+        
+        try:
+            df = self._build_from_fpl_api(rolling_window)
+            
+            if not df.empty and self.use_historical_data and self.historical_integrator:
+                # Enrich with historical ownership
+                logger.info("   Enriching with historical ownership...")
+                df = self.historical_integrator.enrich_current_season_data(df)
+            
+            if not df.empty:
+                logger.info(f"✅ FPL API data loaded: {len(df)} records")
+                return df
+            else:
+                logger.warning("   ⚠️ FPL API data empty - falling back to Strategy 3")
+        
+        except Exception as e:
+            logger.warning(f"   ⚠️ FPL API failed: {e}")
+            logger.info("   Falling back to Strategy 3")
+        
+        # STRATEGY 3: Synthetic fallback
+        logger.info("📊 Strategy 3: Using synthetic data (fallback)")
+        
         if self.bootstrap is None:
-            logger.debug("Fetching bootstrap for training...")
             self.fetch_bootstrap()
         
-        if self.fpl is None or not self.bootstrap or "elements" not in self.bootstrap:
-            logger.error("Cannot build features without bootstrap")
+        if not self.bootstrap or "elements" not in self.bootstrap:
+            logger.error("❌ Cannot build features - no data sources available")
             return pd.DataFrame()
         
         elements = self.bootstrap.get("elements", [])
-        total_elements = len(elements)
+        df = self._build_synthetic_training_data(elements)
         
-        logger.info(f"📊 Fetching training data for {total_elements} players...")
+        if not df.empty:
+            logger.warning("⚠️ Using synthetic data - limited accuracy expected")
+            logger.info(f"   Generated {len(df)} synthetic records")
+        
+        return df
+    
+    def _build_from_fpl_api(self, rolling_window: int = 4) -> pd.DataFrame:
+        """
+        Build training data from FPL API (element_summary).
+        
+        This is Strategy 2 - uses current season data from API.
+        """
+        if self.bootstrap is None:
+            self.fetch_bootstrap()
+        
+        if self.fpl is None or not self.bootstrap or "elements" not in self.bootstrap:
+            return pd.DataFrame()
+        
+        elements = self.bootstrap.get("elements", [])
+        
+        # Build player lookup with current data
+        player_current_data = {}
+        for player in elements:
+            pid = player.get("id")
+            if pid:
+                player_current_data[pid] = {
+                    "selected_by_percent": float(player.get("selected_by_percent", 0)),
+                    "now_cost": float(player.get("now_cost", 50)) / 10.0,
+                    "team": player.get("team", 0),
+                    "element_type": player.get("element_type", 0),
+                    "team_name": self.get_team_name(player.get("team", 0))
+                }
+        
+        logger.info(f"📊 Fetching data for {len(elements)} players from FPL API...")
         
         all_histories = []
-        skipped = 0
-        failed = 0
+        success_count = 0
         
         for idx, player in enumerate(elements):
             pid = player.get("id")
@@ -865,7 +1030,6 @@ class DataPipeline:
                 history_data = summary.get("history", [])
                 
                 if not history_data:
-                    skipped += 1
                     continue
                 
                 history_df = pd.DataFrame(history_data)
@@ -874,93 +1038,97 @@ class DataPipeline:
                     if "round" in history_df.columns:
                         history_df["event"] = history_df["round"]
                     else:
-                        failed += 1
                         continue
                 
                 history_df["player_id"] = pid
                 history_df["web_name"] = player.get("web_name", "Unknown")
+                
+                # Add current player data
+                if pid in player_current_data:
+                    for key, value in player_current_data[pid].items():
+                        history_df[key] = value
+                
                 all_histories.append(history_df)
+                success_count += 1
                 
                 if (idx + 1) % 100 == 0:
-                    logger.info(f"   Progress: {idx + 1}/{total_elements}")
-                
+                    logger.info(f"   Progress: {idx + 1}/{len(elements)} ({success_count} successful)")
+            
             except Exception as e:
-                logger.debug(f"History fetch failed for player {pid}: {e}")
-                failed += 1
+                logger.debug(f"Failed for player {pid}: {e}")
                 continue
         
-        logger.info(f"📊 Collected: {len(all_histories)} successful, {skipped} skipped, {failed} failed")
-        
-        if len(all_histories) < 50:
-            logger.warning("⚠️ Insufficient data. Using synthetic fallback...")
-            return self._build_synthetic_training_data(elements)
-        
         if not all_histories:
-            logger.error("❌ No training data available")
+            logger.error("❌ No player histories retrieved")
             return pd.DataFrame()
         
-        all_df = pd.concat(all_histories, ignore_index=True, sort=False)
-        all_df = all_df.sort_values(["player_id", "event"])
+        logger.info(f"✅ Retrieved histories for {success_count} players")
         
-        # Ensure critical columns exist
-        for col in ["total_points", "event", "player_id"]:
-            if col not in all_df.columns:
-                all_df[col] = 0
+        # Combine all histories
+        df = pd.concat(all_histories, ignore_index=True, sort=False)
+        df = df.sort_values(["player_id", "event"])
         
-        # Add gameweek column (alias for event) for validation compatibility
-        all_df["gameweek"] = all_df["event"]
+        # Add gameweek column
+        df["gameweek"] = df["event"]
         
-        # Add critical features expected by validation
-        self._enrich_training_features(all_df)
+        # Enrich with training features
+        df = self._enrich_training_features(df)
         
         # Create target variable
-        all_df["target_next_points"] = all_df.groupby("player_id")["total_points"].shift(-1)
-        all_df.dropna(subset=["target_next_points"], inplace=True)
+        df["target_next_points"] = df.groupby("player_id")["total_points"].shift(-1)
+        df.dropna(subset=["target_next_points"], inplace=True)
         
-        all_df["predicted_points_next_gw"] = all_df.get("total_points", 0.0)
-        
-        logger.info(f"✅ Training features built: {len(all_df)} records")
-        
-        return all_df
+        return df
     
     def _enrich_training_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Add critical features expected by validation."""
+        """
+        Add critical features expected by validation and training.
+        
+        This ensures all necessary columns exist regardless of source.
+        """
         try:
-            # Ensure numeric types for existing columns
+            # Ensure numeric types
             numeric_cols = [
-                "minutes", "goals_scored", "assists", "clean_sheets", 
-                "goals_conceded", "bonus", "bps", "influence", "creativity", 
-                "threat", "ict_index", "value", "selected_by_percent"
+                "minutes", "goals_scored", "assists", "clean_sheets",
+                "goals_conceded", "bonus", "bps", "influence", "creativity",
+                "threat", "ict_index", "value", "selected_by_percent", "total_points"
             ]
             
             for col in numeric_cols:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
             
-            # Add form if not present (moving average of points)
+            # Add form if not present
             if "form" not in df.columns:
                 df["form"] = df.groupby("player_id")["total_points"].transform(
                     lambda x: x.rolling(window=3, min_periods=1).mean()
                 )
+            else:
+                df["form"] = pd.to_numeric(df.get("form", 7.5), errors="coerce").fillna(7.5)
             
-            # Add opponent_difficulty (from fixture difficulty if available)
-            if "opponent_team" in df.columns and "opponent_difficulty" not in df.columns:
-                df["opponent_difficulty"] = df.get("opponent_difficulty", 3)
-            elif "opponent_difficulty" not in df.columns:
-                df["opponent_difficulty"] = 3
+            # Add fixture difficulty
+            if "opponent_difficulty" not in df.columns:
+                if "difficulty" in df.columns:
+                    df["opponent_difficulty"] = df["difficulty"]
+                else:
+                    df["opponent_difficulty"] = 3
             
-            # Add is_home if not present
+            # Add is_home
             if "is_home" not in df.columns:
                 if "was_home" in df.columns:
                     df["is_home"] = df["was_home"]
                 else:
-                    # Assume home/away split for unknown
                     df["is_home"] = True
             
-            logger.debug("Training features enriched with critical columns")
+            # Ensure selected_by_percent exists
+            if "selected_by_percent" not in df.columns:
+                logger.warning("⚠️ No ownership data - using default 0")
+                df["selected_by_percent"] = 0
+            
+            logger.debug("✅ Training features enriched")
             
         except Exception as e:
-            logger.debug(f"Training feature enrichment failed: {e}")
+            logger.warning(f"⚠️ Training feature enrichment failed: {e}")
         
         return df
     

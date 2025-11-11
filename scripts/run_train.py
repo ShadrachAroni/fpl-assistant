@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.api_client.fpl_client import FPLClient
 from app.data.pipeline import DataPipeline
+from app.data.historical_integrator import HistoricalDataIntegrator
 from app.models.trainer import train_lightgbm
 import yaml
 
@@ -30,149 +31,6 @@ logger = logging.getLogger("training_script")
 # Suppress noisy HTTP logs
 for noisy_logger in ["httpx", "urllib3", "asyncio", "fpl_assistant", "uvicorn.access"]:
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
-
-
-def validate_data_quality(df):
-    """
-    Comprehensive data quality validation.
-    
-    Returns:
-        tuple: (is_valid: bool, warnings: list, metrics: dict)
-    """
-    warnings = []
-    metrics = {}
-    is_valid = True
-    
-    # Basic metrics
-    metrics['total_samples'] = len(df)
-    metrics['unique_players'] = df['player_id'].nunique() if 'player_id' in df.columns else 0
-    metrics['num_features'] = len(df.columns)
-    
-    # Gameweek coverage
-    if 'gameweek' in df.columns:
-        metrics['gameweeks_covered'] = df['gameweek'].nunique()
-        metrics['min_gameweek'] = df['gameweek'].min()
-        metrics['max_gameweek'] = df['gameweek'].max()
-    else:
-        warnings.append("No 'gameweek' column found")
-    
-    # Samples per player
-    if 'player_id' in df.columns:
-        samples_per_player = df.groupby('player_id').size()
-        metrics['avg_samples_per_player'] = samples_per_player.mean()
-        metrics['min_samples_per_player'] = samples_per_player.min()
-        metrics['max_samples_per_player'] = samples_per_player.max()
-        
-        if metrics['min_samples_per_player'] < 3:
-            warnings.append(f"Some players have <3 samples (min: {metrics['min_samples_per_player']})")
-    
-    # Check for critical features
-    critical_features = [
-        'form', 'minutes', 'total_points', 'selected_by_percent',
-        'opponent_difficulty', 'is_home'
-    ]
-    missing_critical = [f for f in critical_features if f not in df.columns]
-    if missing_critical:
-        warnings.append(f"Missing critical features: {', '.join(missing_critical)}")
-        metrics['missing_critical_features'] = missing_critical
-    
-    # Check target variable
-    if 'total_points' in df.columns:
-        metrics['points_mean'] = df['total_points'].mean()
-        metrics['points_std'] = df['total_points'].std()
-        metrics['points_min'] = df['total_points'].min()
-        metrics['points_max'] = df['total_points'].max()
-        
-        if df['total_points'].isnull().any():
-            warnings.append("Target variable 'total_points' has missing values")
-    else:
-        warnings.append("Target variable 'total_points' not found")
-        is_valid = False
-    
-    # Missing value analysis
-    missing_pct = (df.isnull().sum() / len(df) * 100).sort_values(ascending=False)
-    high_missing = missing_pct[missing_pct > 20]
-    
-    if len(high_missing) > 0:
-        warnings.append(f"{len(high_missing)} features have >20% missing values")
-        metrics['high_missing_features'] = high_missing.to_dict()
-    
-    metrics['avg_missing_pct'] = missing_pct.mean()
-    
-    # Check for sufficient data
-    if metrics['total_samples'] < 2000:
-        warnings.append(f"Low sample count: {metrics['total_samples']} (recommended: 2000+)")
-        is_valid = False
-    
-    if metrics['unique_players'] < 200:
-        warnings.append(f"Low player count: {metrics['unique_players']} (recommended: 200+)")
-        is_valid = False
-    
-    if 'gameweeks_covered' in metrics and metrics['gameweeks_covered'] < 5:
-        warnings.append(f"Limited history: {metrics['gameweeks_covered']} GWs (recommended: 5+)")
-    
-    return is_valid, warnings, metrics
-
-
-def log_data_quality_report(metrics, warnings):
-    """Pretty print data quality report."""
-    logger.info("\n" + "=" * 80)
-    logger.info("📊 DATA QUALITY REPORT")
-    logger.info("=" * 80)
-    
-    # Dataset size
-    logger.info("\n📈 Dataset Size:")
-    logger.info(f"   Total samples:        {metrics['total_samples']:,}")
-    logger.info(f"   Unique players:       {metrics['unique_players']:,}")
-    logger.info(f"   Features:             {metrics['num_features']}")
-    
-    # Temporal coverage
-    if 'gameweeks_covered' in metrics:
-        logger.info(f"\n📅 Temporal Coverage:")
-        logger.info(f"   Gameweeks covered:    {metrics['gameweeks_covered']}")
-        logger.info(f"   GW range:             {metrics['min_gameweek']} - {metrics['max_gameweek']}")
-    
-    # Per-player statistics
-    if 'avg_samples_per_player' in metrics:
-        logger.info(f"\n👤 Per-Player Statistics:")
-        logger.info(f"   Avg samples/player:   {metrics['avg_samples_per_player']:.1f}")
-        logger.info(f"   Min samples/player:   {metrics['min_samples_per_player']}")
-        logger.info(f"   Max samples/player:   {metrics['max_samples_per_player']}")
-    
-    # Target variable
-    if 'points_mean' in metrics:
-        logger.info(f"\n🎯 Target Variable (total_points):")
-        logger.info(f"   Mean:                 {metrics['points_mean']:.2f}")
-        logger.info(f"   Std Dev:              {metrics['points_std']:.2f}")
-        logger.info(f"   Range:                [{metrics['points_min']:.0f}, {metrics['points_max']:.0f}]")
-    
-    # Data quality
-    logger.info(f"\n✨ Data Quality:")
-    logger.info(f"   Avg missing %:        {metrics['avg_missing_pct']:.2f}%")
-    
-    if 'missing_critical_features' in metrics:
-        logger.info(f"   Missing critical:     {', '.join(metrics['missing_critical_features'])}")
-    
-    # Warnings
-    if warnings:
-        logger.info("\n⚠️  WARNINGS:")
-        for i, warning in enumerate(warnings, 1):
-            logger.info(f"   {i}. {warning}")
-    else:
-        logger.info("\n✅ No data quality issues detected")
-    
-    logger.info("=" * 80)
-
-
-def determine_cv_splits(n_samples, n_players):
-    """Determine appropriate number of CV splits based on data size."""
-    if n_samples < 500:
-        return 3
-    elif n_samples < 1500:
-        return 4
-    else:
-        return 5
-
 
 def main():
     """Main training pipeline with comprehensive validation."""
@@ -233,7 +91,13 @@ def main():
         rolling_window = config.get("training", {}).get("rolling_window_gw", 4)
         logger.info(f"   Using rolling window: {rolling_window} gameweeks")
         
-        df = pipeline.build_train_features(rolling_window=rolling_window)
+        df = pipeline.build_train_features(
+            season="2024",
+            rolling_window=rolling_window,
+            use_multi_season=True,  # Use multiple seasons
+            seasons=["2022-23", "2023-24", "2024-25"]
+        )
+        
 
         if df.empty:
             logger.error("❌ No training data could be generated")
@@ -253,11 +117,27 @@ def main():
         return
 
     # ===== VALIDATE DATA QUALITY =====
+    # ===== VALIDATE DATA QUALITY =====
     logger.info("\n🔍 STEP 4: Validating data quality...")
 
     try:
-        is_valid, warnings, metrics = validate_data_quality(df)
-        log_data_quality_report(metrics, warnings)
+        # Initialize integrator for validation
+        integrator = HistoricalDataIntegrator(
+            cache_dir="data/cache/historical",
+            current_season="2024-25"
+        )
+        
+        # Use integrator's comprehensive validation
+        metrics = integrator.validate_data_quality(df)
+        print(integrator.get_statistics_summary(df))
+        
+        # Check if data is sufficient for training
+        warnings = metrics.get('warnings', [])
+        is_valid = (
+            metrics['total_samples'] >= 2000 and
+            metrics.get('unique_players', 0) >= 200 and
+            len(warnings) == 0
+        )
 
         if not is_valid:
             logger.error("\n❌ DATA VALIDATION FAILED")
@@ -285,7 +165,7 @@ def main():
         import traceback
         traceback.print_exc()
         return
-
+    
     # ===== TRAIN MODEL =====
     logger.info("\n🤖 STEP 5: Training LightGBM model...")
     logger.info("   This will take several minutes...")
@@ -293,7 +173,13 @@ def main():
     try:
         # Determine optimal CV splits
         n_splits_config = config.get("training", {}).get("n_splits_cv", 5)
-        n_splits = determine_cv_splits(len(df), metrics['unique_players'])
+        # Determine optimal CV splits based on data size
+        if len(df) < 500:
+            n_splits = 3
+        elif len(df) < 1500:
+            n_splits = 4
+        else:
+            n_splits = 5
         
         if n_splits != n_splits_config:
             logger.info(f"   Adjusted CV splits: {n_splits_config} → {n_splits} (based on data size)")

@@ -1,17 +1,20 @@
 """
 Enhanced Model Training Module - LightGBM for FPL Point Predictions
 
-ENHANCEMENTS:
-✅ Risk-aware feature engineering
-✅ Feature importance tracking
-✅ Comprehensive cross-validation
-✅ Hyperparameter optimization support
-✅ Model versioning
-✅ Training metrics logging
-✅ Feature selection
-✅ Model ensemble
+ENHANCEMENTS v6.0:
+✅ Risk-aware feature engineering with comprehensive validation
+✅ Ownership feature integration (template vs differential)
+✅ Price change feature validation
+✅ Feature importance tracking with categorization
+✅ Comprehensive cross-validation with player grouping
+✅ Hyperparameter optimization support (Optuna)
+✅ Model versioning and metadata
+✅ Training metrics logging and persistence
+✅ Feature selection and analysis
+✅ Model ensemble with uncertainty quantification
+✅ Enhanced validation for all new pipeline features
 
-PRODUCTION READY v5.0
+PRODUCTION READY v6.0
 """
 
 import os
@@ -44,7 +47,7 @@ def features_targets_from_df(
     exclude_risk_from_features: bool = False
 ) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
     """
-    Extract features and target from training DataFrame.
+    Extract features and target from training DataFrame with validation.
     
     Args:
         df: Training DataFrame
@@ -56,10 +59,11 @@ def features_targets_from_df(
     """
     # Columns to always exclude
     base_exclude = [
-        "player_id", "web_name", "event", "team_name", 
+        "player_id", "web_name", "event", "gameweek", "team_name", 
         "position", "next_opponent", "next_opponent_short",
         "risk_category", "risk_summary", "fixture_display",
-        target_col
+        "ownership_category", "price_change_status",
+        target_col, "predicted_points_next_gw"  # Remove any prediction columns
     ]
     
     # Risk columns (can be excluded if desired)
@@ -70,7 +74,17 @@ def features_targets_from_df(
         "minutes_volatility", "news_severity"
     ]
     
-    exclude = base_exclude
+    # Ownership/Price columns (usually kept for training)
+    intelligence_cols = [
+        "selected_by_percent", "is_template", "is_differential", "is_premium",
+        "captain_eo_multiplier", "template_priority",
+        "transfers_in_event", "transfers_out_event", "net_transfers",
+        "price_rise_probability", "price_fall_probability",
+        "value_hold_score", "opportunity_cost"
+    ]
+    
+    exclude = base_exclude.copy()
+    
     if exclude_risk_from_features:
         exclude.extend(risk_cols)
         logger.info("⚠️ Excluding risk features from training (risk-agnostic model)")
@@ -81,14 +95,38 @@ def features_targets_from_df(
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
     feats = [c for c in numeric_cols if c not in exclude]
     
+    # Validate feature count
+    if len(feats) < 5:
+        logger.error(f"❌ Too few features: {len(feats)}")
+        logger.error(f"Available numeric columns: {numeric_cols[:20]}")
+        raise ValueError(f"Insufficient features for training: {len(feats)} (need at least 5)")
+    
     # Log feature categories
     risk_feats_in_model = [f for f in feats if f in risk_cols]
+    ownership_feats_in_model = [f for f in feats if f in intelligence_cols]
+    
     if risk_feats_in_model:
         logger.info(f"📊 Risk features in model: {len(risk_feats_in_model)}")
+    if ownership_feats_in_model:
+        logger.info(f"📊 Ownership/Price features in model: {len(ownership_feats_in_model)}")
+    
+    # Validate critical features
+    critical_features = ["form", "minutes", "total_points"]
+    missing_critical = [f for f in critical_features if f not in feats and f not in exclude]
+    if missing_critical:
+        logger.warning(f"⚠️ Missing critical features: {missing_critical}")
     
     logger.info(f"📊 Total features: {len(feats)}")
     
-    return df[feats].fillna(0), df[target_col].fillna(0), feats
+    # Validate target
+    if target_col not in df.columns:
+        raise ValueError(f"Target column '{target_col}' not found in DataFrame")
+    
+    target = df[target_col].fillna(0)
+    if target.isna().any():
+        logger.warning("⚠️ Target has NaN values after fillna")
+    
+    return df[feats].fillna(0), target, feats
 
 
 def calculate_feature_importance(
@@ -105,7 +143,7 @@ def calculate_feature_importance(
         importance_type: Type of importance ('gain', 'split')
     
     Returns:
-        DataFrame with feature importance
+        DataFrame with feature importance and statistics
     """
     importance_dict = {}
     
@@ -159,7 +197,7 @@ def train_lightgbm(
     save_metrics: bool = True
 ) -> Dict[str, Any]:
     """
-    Train LightGBM model with comprehensive cross-validation and metrics.
+    Train LightGBM model with comprehensive validation and intelligence features.
     
     Args:
         df: Training DataFrame with features and target_next_points column
@@ -174,8 +212,15 @@ def train_lightgbm(
         Dict with trained models, features, metrics, and importance
     """
     logger.info("=" * 80)
-    logger.info("🚀 STARTING LIGHTGBM TRAINING WITH RISK FEATURES")
+    logger.info("🚀 STARTING LIGHTGBM TRAINING WITH FULL INTELLIGENCE STACK")
     logger.info("=" * 80)
+    
+    # Validate input DataFrame
+    if df.empty:
+        raise ValueError("❌ Training DataFrame is empty")
+    
+    if len(df) < 100:
+        raise ValueError(f"❌ Insufficient training data: {len(df)} samples (need at least 100)")
     
     # Extract features and target
     X, y, feats = features_targets_from_df(
@@ -183,12 +228,25 @@ def train_lightgbm(
         exclude_risk_from_features=exclude_risk_features
     )
     
-    groups = df.get("player_id", np.arange(len(df)))
+    # Validate features
+    if X.empty or y.empty:
+        raise ValueError("❌ Feature extraction failed - empty data")
+    
+    # Get player grouping for CV
+    if "player_id" in df.columns:
+        groups = df["player_id"].values
+    else:
+        logger.warning("⚠️ No player_id column - using sequential grouping")
+        groups = np.arange(len(df)) % n_splits
     
     logger.info(f"📊 Training data: {len(df)} records | {len(feats)} features | {n_splits} folds")
     logger.info(f"🎯 Target: mean={y.mean():.2f}, std={y.std():.2f}, range=[{y.min():.1f}, {y.max():.1f}]")
     
-    # Default parameters
+    # Validate target distribution
+    if y.std() < 0.1:
+        logger.warning("⚠️ Target has very low variance - model may struggle")
+    
+    # Default parameters optimized for FPL
     if params is None:
         params = {
             "objective": "regression",
@@ -205,9 +263,9 @@ def train_lightgbm(
             "verbosity": -1,
             "seed": 42,
         }
-        logger.info("📝 Using default LightGBM parameters")
+        logger.info("🔧 Using default LightGBM parameters")
     else:
-        logger.info("📝 Using custom LightGBM parameters")
+        logger.info("🔧 Using custom LightGBM parameters")
     
     # Cross-validation setup
     gkf = GroupKFold(n_splits=n_splits)
@@ -227,6 +285,8 @@ def train_lightgbm(
         ytr, yva = y.iloc[tr], y.iloc[va]
         
         logger.info(f"   Train: {len(Xtr)} samples | Valid: {len(Xva)} samples")
+        logger.info(f"   Train target: mean={ytr.mean():.2f}, std={ytr.std():.2f}")
+        logger.info(f"   Valid target: mean={yva.mean():.2f}, std={yva.std():.2f}")
         
         # Create datasets
         dtr = lgb.Dataset(Xtr, ytr)
@@ -249,7 +309,7 @@ def train_lightgbm(
         oof_preds[va] = preds
         
         # Calculate metrics
-        fold_rmse = mean_squared_error(yva, preds, squared=False)
+        fold_rmse = np.sqrt(mean_squared_error(yva, preds))
         fold_mae = mean_absolute_error(yva, preds)
         fold_r2 = r2_score(yva, preds)
         
@@ -290,27 +350,53 @@ def train_lightgbm(
     
     logger.info(f"   Fold RMSE: {fold_rmse_mean:.4f} ± {fold_rmse_std:.4f}")
     
+    # Performance assessment
+    if global_rmse < 2.0:
+        logger.info("   🎉 EXCELLENT performance (RMSE < 2.0)")
+    elif global_rmse < 3.0:
+        logger.info("   👍 GOOD performance (RMSE < 3.0)")
+    elif global_rmse < 4.0:
+        logger.info("   ⚡ ACCEPTABLE performance (RMSE < 4.0)")
+    else:
+        logger.warning("   ⚠️ Below target performance (RMSE > 4.0)")
+    
     # Feature importance
     logger.info("=" * 80)
-    logger.info("📊 FEATURE IMPORTANCE")
+    logger.info("📊 FEATURE IMPORTANCE ANALYSIS")
     logger.info("=" * 80)
     
     importance_df = calculate_feature_importance(models, feats)
     
-    logger.info(f"   Top 10 features by importance:")
-    for idx, row in importance_df.head(10).iterrows():
+    logger.info(f"   Top 15 features by importance:")
+    for idx, row in importance_df.head(15).iterrows():
         logger.info(f"      {idx+1}. {row['feature']}: {row['importance_mean']:.2f}")
     
-    # Check for risk features in top features
+    # Analyze feature categories
     risk_features = [
         "total_risk", "injury_risk", "rotation_risk", "disciplinary_risk",
         "fatigue_risk", "form_drop_risk"
     ]
+    ownership_features = [
+        "selected_by_percent", "is_template", "is_differential",
+        "captain_eo_multiplier", "template_priority"
+    ]
+    price_features = [
+        "net_transfers", "price_rise_probability", "price_fall_probability",
+        "value_hold_score"
+    ]
+    
     top_20_features = importance_df.head(20)["feature"].tolist()
+    
     risk_in_top = [f for f in risk_features if f in top_20_features]
+    ownership_in_top = [f for f in ownership_features if f in top_20_features]
+    price_in_top = [f for f in price_features if f in top_20_features]
     
     if risk_in_top:
         logger.info(f"   ✅ Risk features in top 20: {risk_in_top}")
+    if ownership_in_top:
+        logger.info(f"   ✅ Ownership features in top 20: {ownership_in_top}")
+    if price_in_top:
+        logger.info(f"   ✅ Price features in top 20: {price_in_top}")
     
     # Prepare results
     results = {
@@ -324,7 +410,12 @@ def train_lightgbm(
         "n_features": len(feats),
         "n_folds": n_splits,
         "training_date": datetime.now().isoformat(),
-        "params": params
+        "params": params,
+        "feature_categories": {
+            "risk_features": risk_in_top,
+            "ownership_features": ownership_in_top,
+            "price_features": price_in_top
+        }
     }
     
     # Save model
@@ -343,7 +434,8 @@ def train_lightgbm(
         "oof_r2": global_r2,
         "training_date": results["training_date"],
         "params": params,
-        "n_folds": n_splits
+        "n_folds": n_splits,
+        "feature_categories": results["feature_categories"]
     }
     
     joblib.dump(model_data, MODEL_PATH)
@@ -360,8 +452,10 @@ def train_lightgbm(
                 "oof_r2": float(global_r2),
                 "n_features": len(feats),
                 "n_folds": n_splits,
+                "n_samples": len(df),
                 "fold_metrics": fold_metrics,
-                "top_features": importance_df.head(20).to_dict("records")
+                "top_features": importance_df.head(20).to_dict("records"),
+                "feature_categories": results["feature_categories"]
             }
             
             with open(METRICS_PATH, "w") as f:
@@ -410,7 +504,11 @@ def optimize_hyperparameters(
     logger.info(f"🔧 Starting hyperparameter optimization ({n_trials} trials)...")
     
     X, y, feats = features_targets_from_df(df)
-    groups = df.get("player_id", np.arange(len(df)))
+    
+    if "player_id" in df.columns:
+        groups = df["player_id"].values
+    else:
+        groups = np.arange(len(df)) % n_splits
     
     def objective(trial):
         """Optuna objective function."""
@@ -419,7 +517,7 @@ def optimize_hyperparameters(
             "metric": "rmse",
             "verbosity": -1,
             "seed": 42,
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
             "num_leaves": trial.suggest_int("num_leaves", 20, 100),
             "max_depth": trial.suggest_int("max_depth", 3, 12),
             "feature_fraction": trial.suggest_float("feature_fraction", 0.6, 1.0),
@@ -518,7 +616,8 @@ def evaluate_model(
         "training_date": model_data.get("training_date", "unknown"),
         "training_rmse": model_data.get("oof_rmse"),
         "training_mae": model_data.get("oof_mae"),
-        "training_r2": model_data.get("oof_r2")
+        "training_r2": model_data.get("oof_r2"),
+        "feature_categories": model_data.get("feature_categories", {})
     }
     
     # Test set evaluation
@@ -557,55 +656,79 @@ def evaluate_model(
 # Feature Analysis
 # ----------------------------------------------------------
 
-def analyze_risk_features(df: pd.DataFrame) -> Dict[str, Any]:
+def analyze_intelligence_features(df: pd.DataFrame) -> Dict[str, Any]:
     """
-    Analyze the impact of risk features on predictions.
+    Analyze the impact of intelligence features (risk, ownership, price).
     
     Args:
-        df: Training DataFrame with risk features
+        df: Training DataFrame with intelligence features
     
     Returns:
         Analysis results
     """
-    logger.info("🔍 Analyzing risk feature impact...")
+    logger.info("🔍 Analyzing intelligence feature impact...")
     
+    # Feature categories
     risk_features = [
         "total_risk", "injury_risk", "rotation_risk", 
         "disciplinary_risk", "fatigue_risk", "form_drop_risk"
     ]
-    
-    available_risk_features = [f for f in risk_features if f in df.columns]
-    
-    if not available_risk_features:
-        logger.warning("⚠️ No risk features found in DataFrame")
-        return {}
+    ownership_features = [
+        "selected_by_percent", "is_template", "is_differential",
+        "captain_eo_multiplier", "template_priority"
+    ]
+    price_features = [
+        "net_transfers", "price_rise_probability", "price_fall_probability",
+        "value_hold_score", "opportunity_cost"
+    ]
     
     analysis = {
-        "risk_features_available": available_risk_features,
-        "correlations": {},
-        "statistics": {}
+        "risk_features": {},
+        "ownership_features": {},
+        "price_features": {}
     }
     
-    # Correlation with target
-    if "target_next_points" in df.columns:
-        for feature in available_risk_features:
-            corr = df[feature].corr(df["target_next_points"])
-            analysis["correlations"][feature] = float(corr)
-            logger.info(f"   {feature}: {corr:.4f} correlation with target")
+    # Analyze each category
+    for category, features in [
+        ("risk_features", risk_features),
+        ("ownership_features", ownership_features),
+        ("price_features", price_features)
+    ]:
+        available = [f for f in features if f in df.columns]
+        analysis[category]["available"] = available
+        analysis[category]["count"] = len(available)
+        
+        if not available:
+            continue
+        
+        # Correlation with target
+        if "target_next_points" in df.columns:
+            correlations = {}
+            for feature in available:
+                try:
+                    corr = df[feature].corr(df["target_next_points"])
+                    correlations[feature] = float(corr)
+                    logger.info(f"   {feature}: {corr:.4f} correlation with target")
+                except:
+                    pass
+            analysis[category]["correlations"] = correlations
+        
+        # Statistics
+        stats = {}
+        for feature in available:
+            try:
+                stats[feature] = {
+                    "mean": float(df[feature].mean()),
+                    "std": float(df[feature].std()),
+                    "min": float(df[feature].min()),
+                    "max": float(df[feature].max()),
+                    "missing_pct": float(df[feature].isna().mean() * 100)
+                }
+            except:
+                pass
+        analysis[category]["statistics"] = stats
     
-    # Risk feature statistics
-    for feature in available_risk_features:
-        analysis["statistics"][feature] = {
-            "mean": float(df[feature].mean()),
-            "std": float(df[feature].std()),
-            "min": float(df[feature].min()),
-            "max": float(df[feature].max()),
-            "high_risk_count": int((df[feature] > 0.6).sum()),
-            "medium_risk_count": int(((df[feature] >= 0.3) & (df[feature] <= 0.6)).sum()),
-            "low_risk_count": int((df[feature] < 0.3).sum())
-        }
-    
-    logger.info("✅ Risk feature analysis complete")
+    logger.info("✅ Intelligence feature analysis complete")
     
     return analysis
 
@@ -730,7 +853,7 @@ def get_training_history() -> Optional[Dict[str, Any]]:
 
 
 def print_model_summary(model_path: str = MODEL_PATH):
-    """Print summary of trained model."""
+    """Print comprehensive summary of trained model."""
     if not os.path.exists(model_path):
         logger.error(f"Model not found: {model_path}")
         return
@@ -738,19 +861,289 @@ def print_model_summary(model_path: str = MODEL_PATH):
     model_data = joblib.load(model_path)
     
     print("=" * 80)
-    print("📊 MODEL SUMMARY")
+    print("📊 MODEL SUMMARY - FULL INTELLIGENCE STACK")
     print("=" * 80)
     print(f"Training Date: {model_data.get('training_date', 'unknown')}")
     print(f"Number of Models: {len(model_data.get('models', []))}")
     print(f"Number of Features: {len(model_data.get('feats', []))}")
-    print(f"Out-of-Fold RMSE: {model_data.get('oof_rmse', 0):.4f}")
-    print(f"Out-of-Fold MAE: {model_data.get('oof_mae', 0):.4f}")
-    print(f"Out-of-Fold R²: {model_data.get('oof_r2', 0):.4f}")
+    print(f"\nOut-of-Fold Performance:")
+    print(f"  RMSE: {model_data.get('oof_rmse', 0):.4f}")
+    print(f"  MAE:  {model_data.get('oof_mae', 0):.4f}")
+    print(f"  R²:   {model_data.get('oof_r2', 0):.4f}")
     
+    # Feature categories
+    if "feature_categories" in model_data:
+        categories = model_data["feature_categories"]
+        print(f"\nIntelligence Features:")
+        if categories.get("risk_features"):
+            print(f"  Risk: {', '.join(categories['risk_features'])}")
+        if categories.get("ownership_features"):
+            print(f"  Ownership: {', '.join(categories['ownership_features'])}")
+        if categories.get("price_features"):
+            print(f"  Price: {', '.join(categories['price_features'])}")
+    
+    # Top features
     if "feature_importance" in model_data:
         importance_df = pd.DataFrame(model_data["feature_importance"])
-        print("\nTop 10 Features:")
-        for idx, row in importance_df.head(10).iterrows():
+        print("\nTop 15 Features:")
+        for idx, row in importance_df.head(15).iterrows():
             print(f"  {idx+1}. {row['feature']}: {row['importance_mean']:.2f}")
     
     print("=" * 80)
+
+
+def validate_training_data(df: pd.DataFrame) -> Dict[str, Any]:
+    """
+    Comprehensive validation of training data quality.
+    
+    Args:
+        df: Training DataFrame
+    
+    Returns:
+        Validation report
+    """
+    report = {
+        "valid": True,
+        "warnings": [],
+        "errors": [],
+        "metrics": {}
+    }
+    
+    # Basic checks
+    if df.empty:
+        report["valid"] = False
+        report["errors"].append("DataFrame is empty")
+        return report
+    
+    report["metrics"]["total_samples"] = len(df)
+    
+    # Player coverage
+    if "player_id" in df.columns:
+        report["metrics"]["unique_players"] = df["player_id"].nunique()
+        samples_per_player = df.groupby("player_id").size()
+        report["metrics"]["avg_samples_per_player"] = float(samples_per_player.mean())
+        report["metrics"]["min_samples_per_player"] = int(samples_per_player.min())
+        
+        if report["metrics"]["min_samples_per_player"] < 2:
+            report["warnings"].append("Some players have <2 samples")
+    
+    # Gameweek coverage
+    if "gameweek" in df.columns:
+        report["metrics"]["gameweeks_covered"] = df["gameweek"].nunique()
+        report["metrics"]["gw_range"] = [int(df["gameweek"].min()), int(df["gameweek"].max())]
+        
+        if report["metrics"]["gameweeks_covered"] < 3:
+            report["warnings"].append("Limited gameweek coverage (<3 GWs)")
+    
+    # Target variable
+    if "target_next_points" in df.columns:
+        target = df["target_next_points"]
+        report["metrics"]["target_mean"] = float(target.mean())
+        report["metrics"]["target_std"] = float(target.std())
+        report["metrics"]["target_range"] = [float(target.min()), float(target.max())]
+        
+        if target.isna().any():
+            report["warnings"].append("Target has missing values")
+        
+        if target.std() < 0.1:
+            report["warnings"].append("Target has very low variance")
+    else:
+        report["valid"] = False
+        report["errors"].append("Missing target variable 'target_next_points'")
+    
+    # Feature coverage
+    critical_features = ["form", "minutes", "total_points", "fixture_difficulty"]
+    missing_critical = [f for f in critical_features if f not in df.columns]
+    
+    if missing_critical:
+        report["warnings"].append(f"Missing critical features: {', '.join(missing_critical)}")
+    
+    # Intelligence features
+    risk_features = ["total_risk", "injury_risk", "rotation_risk"]
+    ownership_features = ["selected_by_percent", "is_template"]
+    price_features = ["net_transfers", "price_rise_probability"]
+    
+    report["metrics"]["has_risk_features"] = all(f in df.columns for f in risk_features)
+    report["metrics"]["has_ownership_features"] = all(f in df.columns for f in ownership_features)
+    report["metrics"]["has_price_features"] = all(f in df.columns for f in price_features)
+    
+    # Missing data analysis
+    missing_pct = (df.isnull().sum() / len(df) * 100).sort_values(ascending=False)
+    high_missing = missing_pct[missing_pct > 20]
+    
+    if len(high_missing) > 0:
+        report["warnings"].append(f"{len(high_missing)} features have >20% missing values")
+        report["metrics"]["high_missing_features"] = high_missing.to_dict()
+    
+    report["metrics"]["avg_missing_pct"] = float(missing_pct.mean())
+    
+    # Sample size check
+    if len(df) < 500:
+        report["warnings"].append(f"Low sample count: {len(df)} (recommended: 500+)")
+    
+    if "player_id" in df.columns and df["player_id"].nunique() < 50:
+        report["warnings"].append(f"Low player count: {df['player_id'].nunique()} (recommended: 50+)")
+    
+    # Final validation
+    if report["errors"]:
+        report["valid"] = False
+    
+    return report
+
+
+def log_training_data_report(report: Dict[str, Any]):
+    """
+    Pretty print training data validation report.
+    
+    Args:
+        report: Validation report from validate_training_data
+    """
+    logger.info("\n" + "=" * 80)
+    logger.info("📋 TRAINING DATA VALIDATION REPORT")
+    logger.info("=" * 80)
+    
+    # Status
+    if report["valid"]:
+        logger.info("✅ VALIDATION PASSED")
+    else:
+        logger.error("❌ VALIDATION FAILED")
+    
+    # Metrics
+    metrics = report.get("metrics", {})
+    if metrics:
+        logger.info("\n📊 Dataset Metrics:")
+        logger.info(f"   Total samples: {metrics.get('total_samples', 0):,}")
+        
+        if "unique_players" in metrics:
+            logger.info(f"   Unique players: {metrics['unique_players']:,}")
+            logger.info(f"   Avg samples/player: {metrics.get('avg_samples_per_player', 0):.1f}")
+        
+        if "gameweeks_covered" in metrics:
+            logger.info(f"   Gameweeks: {metrics['gameweeks_covered']} (GW{metrics['gw_range'][0]}-{metrics['gw_range'][1]})")
+        
+        if "target_mean" in metrics:
+            logger.info(f"   Target: mean={metrics['target_mean']:.2f}, std={metrics['target_std']:.2f}")
+        
+        logger.info(f"   Avg missing: {metrics.get('avg_missing_pct', 0):.2f}%")
+        
+        # Intelligence features
+        logger.info("\n🎯 Intelligence Features:")
+        logger.info(f"   Risk features: {'✅' if metrics.get('has_risk_features') else '❌'}")
+        logger.info(f"   Ownership features: {'✅' if metrics.get('has_ownership_features') else '❌'}")
+        logger.info(f"   Price features: {'✅' if metrics.get('has_price_features') else '❌'}")
+    
+    # Errors
+    if report["errors"]:
+        logger.error("\n❌ ERRORS:")
+        for i, error in enumerate(report["errors"], 1):
+            logger.error(f"   {i}. {error}")
+    
+    # Warnings
+    if report["warnings"]:
+        logger.warning("\n⚠️ WARNINGS:")
+        for i, warning in enumerate(report["warnings"], 1):
+            logger.warning(f"   {i}. {warning}")
+    
+    logger.info("=" * 80 + "\n")
+
+
+def prepare_training_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prepare and validate training data before model training.
+    
+    Args:
+        df: Raw training DataFrame
+    
+    Returns:
+        Prepared DataFrame ready for training
+    """
+    logger.info("🔧 Preparing training data...")
+    
+    # Validate
+    report = validate_training_data(df)
+    log_training_data_report(report)
+    
+    if not report["valid"]:
+        raise ValueError("Training data validation failed - cannot proceed")
+    
+    # Sort by player and gameweek
+    if "player_id" in df.columns and "gameweek" in df.columns:
+        df = df.sort_values(["player_id", "gameweek"])
+        logger.info("✅ Sorted by player_id and gameweek")
+    
+    # Remove duplicates
+    initial_size = len(df)
+    df = df.drop_duplicates()
+    if len(df) < initial_size:
+        logger.info(f"   Removed {initial_size - len(df)} duplicate rows")
+    
+    # Ensure numeric types for critical columns
+    numeric_cols = [
+        "total_points", "minutes", "form", "fixture_difficulty",
+        "selected_by_percent", "total_risk"
+    ]
+    
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    
+    logger.info(f"✅ Training data prepared: {len(df)} samples")
+    
+    return df
+
+
+# ----------------------------------------------------------
+# Enhanced Training Pipeline
+# ----------------------------------------------------------
+
+def train_with_validation(
+    df: pd.DataFrame,
+    n_splits: int = 5,
+    run_comparison: bool = False,
+    optimize: bool = False,
+    n_trials: int = 30
+) -> Dict[str, Any]:
+    """
+    Complete training pipeline with validation and optional optimization.
+    
+    Args:
+        df: Raw training DataFrame
+        n_splits: Number of CV folds
+        run_comparison: Compare with/without risk features
+        optimize: Run hyperparameter optimization
+        n_trials: Number of optimization trials
+    
+    Returns:
+        Training results
+    """
+    logger.info("=" * 80)
+    logger.info("🚀 ENHANCED TRAINING PIPELINE - FULL INTELLIGENCE STACK")
+    logger.info("=" * 80)
+    
+    # Prepare data
+    df_prepared = prepare_training_data(df)
+    
+    # Analyze intelligence features
+    intelligence_analysis = analyze_intelligence_features(df_prepared)
+    
+    # Optimize if requested
+    if optimize:
+        logger.info("\n🔧 Running hyperparameter optimization...")
+        results = optimize_hyperparameters(df_prepared, n_trials=n_trials, n_splits=n_splits)
+    else:
+        # Standard training
+        results = train_lightgbm(df_prepared, n_splits=n_splits)
+    
+    # Comparison if requested
+    if run_comparison:
+        logger.info("\n🔬 Running model comparison...")
+        comparison = compare_models(df_prepared, n_splits=n_splits)
+        results["comparison"] = comparison
+    
+    results["intelligence_analysis"] = intelligence_analysis
+    
+    logger.info("\n" + "=" * 80)
+    logger.info("✅ ENHANCED TRAINING PIPELINE COMPLETE")
+    logger.info("=" * 80)
+    
+    return results
