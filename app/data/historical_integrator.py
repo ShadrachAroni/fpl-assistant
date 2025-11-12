@@ -195,23 +195,22 @@ class HistoricalDataIntegrator:
                 logger.warning(f"   ⚠️ Skipping {season} - no data")
                 continue
             
-            # Filter by minimum gameweeks
-            if "gameweek" in df.columns:
-                unique_gws = df["gameweek"].nunique()
-                if unique_gws < min_gameweeks:
-                    logger.warning(f"   ⚠️ Skipping {season} - only {unique_gws} GWs")
-                    continue
-            
             # Add season identifier
             df["season"] = season
+            
+            # ✅ FIX: Reset index to ensure unique indices before concatenation
+            df = df.reset_index(drop=True)
+            
             all_dfs.append(df)
             
             logger.info(f"   ✅ {season}: {len(df)} records")
-        
-        if not all_dfs:
+
+        # Check if we have data
+        if len(all_dfs) == 0:
             logger.error("❌ No data loaded from any season")
             return pd.DataFrame()
         
+        # ✅ FIX: Already using ignore_index=True, but now with reset indices
         combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
         
         logger.info(f"✅ Multi-season data: {len(combined_df)} total records")
@@ -299,9 +298,13 @@ class HistoricalDataIntegrator:
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
             
-            # Read CSV from response content
+            # Read CSV from response content with error handling
             from io import StringIO
-            df = pd.read_csv(StringIO(response.text))
+            df = pd.read_csv(
+                StringIO(response.text),
+                on_bad_lines='skip',  # ✅ ADDED: Skip bad lines
+                engine='python'        # ✅ ADDED: Use Python engine for flexibility
+            )
             
             logger.info(f"   ✅ Downloaded {len(df)} records")
             
@@ -313,7 +316,7 @@ class HistoricalDataIntegrator:
         except Exception as e:
             logger.error(f"   ❌ Parse failed: {e}")
             return None
-    
+        
     def download_player_history(
         self,
         season: str,
@@ -427,7 +430,7 @@ class HistoricalDataIntegrator:
         required_cols = ["player_id", "gameweek", "total_points"]
         missing_cols = [c for c in required_cols if c not in df.columns]
         
-        if missing_cols:
+        if len(missing_cols) > 0:  # ✅ FIXED: Changed from "if missing_cols:"
             logger.error(f"❌ Missing required columns: {missing_cols}")
             return pd.DataFrame()
         

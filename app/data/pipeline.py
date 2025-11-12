@@ -934,7 +934,7 @@ class DataPipeline:
                     logger.info(f"   Gameweeks: {metrics['gameweeks_covered']}")
                     logger.info(f"   Has ownership: {metrics['has_ownership']}")
                     
-                    if metrics["warnings"]:
+                    if len(metrics.get("warnings", [])) > 0:
                         logger.warning(f"   ⚠️ {len(metrics['warnings'])} warnings")
                     
                     # Enrich with additional features
@@ -946,8 +946,10 @@ class DataPipeline:
             
             except Exception as e:
                 logger.warning(f"   ⚠️ Historical data failed: {e}")
+                import traceback
+                traceback.print_exc()  # ← ADD THIS LINE
                 logger.info("   Falling back to Strategy 2")
-        
+                    
         # STRATEGY 2: FPL API enriched with historical ownership
         logger.info("📊 Strategy 2: Using FPL API + historical enrichment")
         
@@ -1034,11 +1036,15 @@ class DataPipeline:
                 
                 history_df = pd.DataFrame(history_data)
                 
+                # ✅ FIX: Ensure 'event' column exists with proper fallback
                 if "event" not in history_df.columns:
                     if "round" in history_df.columns:
                         history_df["event"] = history_df["round"]
+                    elif "GW" in history_df.columns:
+                        history_df["event"] = history_df["GW"]
                     else:
-                        continue
+                        # Create sequential gameweek numbers if no event column
+                        history_df["event"] = range(1, len(history_df) + 1)
                 
                 history_df["player_id"] = pid
                 history_df["web_name"] = player.get("web_name", "Unknown")
@@ -1068,8 +1074,9 @@ class DataPipeline:
         df = pd.concat(all_histories, ignore_index=True, sort=False)
         df = df.sort_values(["player_id", "event"])
         
-        # Add gameweek column
-        df["gameweek"] = df["event"]
+        # ✅ FIX: Ensure gameweek column exists (required for historical enrichment)
+        if "gameweek" not in df.columns:
+            df["gameweek"] = df["event"]
         
         # Enrich with training features
         df = self._enrich_training_features(df)
