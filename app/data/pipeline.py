@@ -16,13 +16,16 @@ NEW FEATURES:
 PRODUCTION READY v6.1
 """
 
+import json
 import logging
 import re
 import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
-import pandas as pd
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+
 import numpy as np
+import pandas as pd
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -118,22 +121,15 @@ class DataPipeline:
         # Market intelligence + contextual intel
         self.market_cfg = config.get("market_intelligence", {})
         self.intel_cfg = config.get("contextual_intel", {})
+        self.risk_cfg = config.get("risk_assessment", {})
+        self.rotation_monitor_cfg = self.risk_cfg.get("rotation_monitor", {})
+        self.rotation_prone_managers = self._load_rotation_prone_metadata()
 
         # Price change thresholds
         base_threshold = float(self.market_cfg.get("price_rise_base_threshold", 100000))
         self.price_rise_threshold = base_threshold  # transfers in baseline
         self.price_fall_threshold = -base_threshold
         
-        # Rotation prone managers
-        self.rotation_prone_managers = {
-            "Manchester City": ["Pep Guardiola"],
-            "Chelsea": ["Mauricio Pochettino", "Enzo Maresca"],
-            "Liverpool": ["Jurgen Klopp", "Arne Slot"],
-            "Tottenham Hotspur": ["Ange Postecoglou"],
-            "Brighton and Hove Albion": ["Fabian Huerzeler", "Roberto De Zerbi"],
-            "Newcastle United": ["Eddie Howe"],
-        }
-
         self.team_momentum_map: Dict[int, float] = {}
         self.manager_change_map = self.intel_cfg.get("manager_changes", {})
         self.european_lookup = self.intel_cfg.get("european_competitions", {})
@@ -354,6 +350,59 @@ class DataPipeline:
         Helps avoid pandas PerformanceWarning when adding many columns.
         """
         return df.copy()
+
+    def _load_rotation_prone_metadata(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Load rotation-prone metadata from the monitor cache if available.
+        Falls back to static config list otherwise.
+        """
+        monitor_cfg = self.rotation_monitor_cfg or {}
+        cache_path = Path(monitor_cfg.get("cache_path", "data/rotation_watch.json"))
+        fallback_teams = self.risk_cfg.get("rotation_prone_teams", [])
+        metadata: Dict[str, Dict[str, Any]] = {}
+
+        if cache_path.exists():
+            try:
+                with cache_path.open("r", encoding="utf-8") as fh:
+                    payload = json.load(fh)
+
+                for entry in payload.get("teams", []):
+                    if entry.get("is_rotation_prone"):
+                        team_name = entry.get("team_name")
+                        if team_name:
+                            metadata[team_name] = entry
+            except Exception as exc:
+                logger.warning(f"⚠️ Rotation monitor cache load failed: {exc}")
+
+        if not metadata and fallback_teams:
+            fallback_score = float(monitor_cfg.get("fallback_rotation_score", 0.45))
+            metadata = {
+                team: {
+                    "team_name": team,
+                    "rotation_score": fallback_score,
+                    "source": "config_fallback",
+                }
+                for team in fallback_teams
+            }
+
+        return metadata
+
+    def _rotation_risk_for_team(self, team_name: str) -> float:
+        """
+        Map a team name to the rotation risk multiplier contributed by
+        manager-level tinkering.
+        """
+        entry = self.rotation_prone_managers.get(team_name)
+        if not entry:
+            return 0.0
+
+        score = float(
+            entry.get(
+                "rotation_score",
+                self.rotation_monitor_cfg.get("fallback_rotation_score", 0.4),
+            )
+        )
+        return max(0.0, min(1.0, score))
     
     def _enrich_with_ownership_intelligence(self, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -886,9 +935,7 @@ class DataPipeline:
             
             df["minutes_volatility"] = (1 - df["reliability"]) * 0.5
             
-            df["manager_rotation_risk"] = df["team_name"].apply(
-                lambda team: 0.3 if team in self.rotation_prone_managers else 0.0
-            )
+            df["manager_rotation_risk"] = df["team_name"].apply(self._rotation_risk_for_team)
 
             df["congestion_risk"] = df["team_name"].apply(
                 lambda name: self._calculate_congestion_risk(name, self.current_gw)

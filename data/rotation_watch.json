@@ -1,0 +1,314 @@
+{
+  "generated_at": "2025-11-17T16:11:16.697204+00:00",
+  "last_completed_gw": 11,
+  "window_gameweeks": [
+    9,
+    10,
+    11
+  ],
+  "starter_minutes": 55,
+  "prone_threshold": 0.4,
+  "rotation_prone_teams": [],
+  "teams": [
+    {
+      "team_id": 4,
+      "team_name": "Bournemouth",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.759,
+      "avg_changes": 3.0,
+      "unique_starters": 14,
+      "rotation_score": 0.241,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 18,
+      "team_name": "Spurs",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.805,
+      "avg_changes": 2.5,
+      "unique_starters": 14,
+      "rotation_score": 0.195,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 12,
+      "team_name": "Liverpool",
+      "manager": "Arne Slot",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.818,
+      "avg_changes": 2.0,
+      "unique_starters": 14,
+      "rotation_score": 0.182,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 13,
+      "team_name": "Man City",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.818,
+      "avg_changes": 2.5,
+      "unique_starters": 15,
+      "rotation_score": 0.182,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 10,
+      "team_name": "Fulham",
+      "manager": "Marco Silva",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.85,
+      "avg_changes": 2.5,
+      "unique_starters": 14,
+      "rotation_score": 0.15,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 7,
+      "team_name": "Chelsea",
+      "manager": "Enzo Maresca",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.864,
+      "avg_changes": 1.5,
+      "unique_starters": 14,
+      "rotation_score": 0.136,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 8,
+      "team_name": "Crystal Palace",
+      "manager": "Oliver Glasner",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.864,
+      "avg_changes": 1.5,
+      "unique_starters": 13,
+      "rotation_score": 0.136,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 14,
+      "team_name": "Man Utd",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.864,
+      "avg_changes": 1.5,
+      "unique_starters": 14,
+      "rotation_score": 0.136,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 15,
+      "team_name": "Newcastle",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.875,
+      "avg_changes": 4.0,
+      "unique_starters": 14,
+      "rotation_score": 0.125,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 3,
+      "team_name": "Burnley",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 1.0,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 5,
+      "team_name": "Brentford",
+      "manager": "Thomas Frank",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 1.0,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 9,
+      "team_name": "Everton",
+      "manager": "Sean Dyche",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 1.0,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 11,
+      "team_name": "Leeds",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 2.0,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 16,
+      "team_name": "Nott'm Forest",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 2.5,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 19,
+      "team_name": "West Ham",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.909,
+      "avg_changes": 1.0,
+      "unique_starters": 13,
+      "rotation_score": 0.091,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 20,
+      "team_name": "Wolves",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.929,
+      "avg_changes": 4.5,
+      "unique_starters": 15,
+      "rotation_score": 0.071,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 1,
+      "team_name": "Arsenal",
+      "manager": "Mikel Arteta",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.95,
+      "avg_changes": 1.5,
+      "unique_starters": 12,
+      "rotation_score": 0.05,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 2,
+      "team_name": "Aston Villa",
+      "manager": "Unai Emery",
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.955,
+      "avg_changes": 1.0,
+      "unique_starters": 12,
+      "rotation_score": 0.045,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 6,
+      "team_name": "Brighton",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 0.955,
+      "avg_changes": 0.5,
+      "unique_starters": 12,
+      "rotation_score": 0.045,
+      "is_rotation_prone": false
+    },
+    {
+      "team_id": 17,
+      "team_name": "Sunderland",
+      "manager": null,
+      "window_gws": [
+        9,
+        10,
+        11
+      ],
+      "avg_overlap_ratio": 1.0,
+      "avg_changes": 0.0,
+      "unique_starters": 11,
+      "rotation_score": 0.0,
+      "is_rotation_prone": false
+    }
+  ]
+}

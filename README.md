@@ -82,6 +82,23 @@ To call the recommender without spinning up FastAPI you can run:
 python scripts/run_recommend.py --manager-id 123456
 ```
 
+### Rotation monitor (auto-update)
+
+The new rotation monitor scores managers based on how often they change their starting XI over the last few gameweeks.  
+It pulls official FPL match histories, flags high-volatility teams, and writes the cache that the data pipeline consumes when computing rotation risk.
+
+Single run:
+```bash
+python -m scripts.rotation_watch
+```
+
+Continuous background refresh (every 3 hours):
+```bash
+python -m scripts.rotation_watch --interval-minutes 180
+```
+
+Outputs land in `data/rotation_watch.json`; the pipeline automatically ingests this file and scales rotation risk by the live volatility score.
+
 ---
 
 ## Response anatomy (`/recommend/{manager_id}`)

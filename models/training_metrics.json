@@ -1,58 +1,58 @@
 {
-  "training_date": "2025-11-17T16:48:31.588012",
-  "oof_rmse": 2.1857825604857064,
-  "oof_mae": 1.269549888657563,
-  "oof_r2": 0.12224991617458025,
+  "training_date": "2025-11-17T19:03:03.210102",
+  "oof_rmse": 2.182706816733198,
+  "oof_mae": 1.2665508867394926,
+  "oof_r2": 0.12471844612585126,
   "n_features": 42,
   "n_folds": 5,
   "n_samples": 69542,
   "fold_metrics": [
     {
       "fold": 1,
-      "rmse": 2.067704105537098,
-      "mae": 1.194988921518549,
-      "r2": 0.12086483400220782,
-      "best_iteration": 64,
+      "rmse": 2.0662981718405606,
+      "mae": 1.1935390226213365,
+      "r2": 0.12205996200899916,
+      "best_iteration": 204,
       "n_train": 55634,
       "n_valid": 13908,
       "description": "GLOBAL"
     },
     {
       "fold": 2,
-      "rmse": 2.252295555994454,
-      "mae": 1.3136140121563957,
-      "r2": 0.11414562124571881,
-      "best_iteration": 83,
+      "rmse": 2.24654671386331,
+      "mae": 1.3086829635959938,
+      "r2": 0.11866202464936093,
+      "best_iteration": 257,
       "n_train": 55634,
       "n_valid": 13908,
       "description": "GLOBAL"
     },
     {
       "fold": 3,
-      "rmse": 2.216361459964299,
-      "mae": 1.2858014329319651,
-      "r2": 0.12316172752284527,
-      "best_iteration": 63,
+      "rmse": 2.212947994323173,
+      "mae": 1.2798887652132687,
+      "r2": 0.1258605224028203,
+      "best_iteration": 233,
       "n_train": 55634,
       "n_valid": 13908,
       "description": "GLOBAL"
     },
     {
       "fold": 4,
-      "rmse": 2.2936005847313607,
-      "mae": 1.328576600271964,
-      "r2": 0.11626816270415075,
-      "best_iteration": 82,
+      "rmse": 2.2900571215676946,
+      "mae": 1.3238125188770522,
+      "r2": 0.11899666937925035,
+      "best_iteration": 254,
       "n_train": 55633,
       "n_valid": 13909,
       "description": "GLOBAL"
     },
     {
       "fold": 5,
-      "rmse": 2.0897666130918195,
-      "mae": 1.2247674522303962,
-      "r2": 0.13249695045668186,
-      "best_iteration": 80,
+      "rmse": 2.0887744843141536,
+      "mae": 1.2268299021985827,
+      "r2": 0.13332045910077706,
+      "best_iteration": 186,
       "n_train": 55633,
       "n_valid": 13909,
       "description": "GLOBAL"
@@ -61,143 +61,143 @@
   "top_features": [
     {
       "feature": "minutes_roll4",
-      "importance_mean": 195462.90983276366,
-      "importance_std": 2991.779039514045,
-      "importance_min": 192048.07389450073,
-      "importance_max": 200652.48914527893
+      "importance_mean": 567879.094854927,
+      "importance_std": 6443.789530237459,
+      "importance_min": 559997.3707084656,
+      "importance_max": 579019.5675868988
     },
     {
       "feature": "ict_index_roll4",
-      "importance_mean": 38829.93576507569,
-      "importance_std": 6221.464551583887,
-      "importance_min": 31484.154628753662,
-      "importance_max": 49148.62251281738
-    },
-    {
-      "feature": "goals_conceded",
-      "importance_mean": 26612.756691360475,
-      "importance_std": 1258.2884970303487,
-      "importance_min": 24299.75796508789,
-      "importance_max": 27605.915008544922
-    },
-    {
-      "feature": "transfers_in",
-      "importance_mean": 25048.9918258667,
-      "importance_std": 1047.7772078682165,
-      "importance_min": 23708.16767501831,
-      "importance_max": 26253.386878967285
-    },
-    {
-      "feature": "value",
-      "importance_mean": 20190.713497161865,
-      "importance_std": 2150.975654760779,
-      "importance_min": 16745.62353515625,
-      "importance_max": 22403.882968902588
-    },
-    {
-      "feature": "expected_assists_roll4",
-      "importance_mean": 17253.754932403564,
-      "importance_std": 1952.6644149605452,
-      "importance_min": 13749.75659942627,
-      "importance_max": 19411.28472137451
+      "importance_mean": 215080.95841693878,
+      "importance_std": 14110.500152481794,
+      "importance_min": 191333.52189064026,
+      "importance_max": 230403.51830101013
     },
     {
       "feature": "total_points_roll4",
-      "importance_mean": 16367.713515472413,
-      "importance_std": 4840.255824048557,
-      "importance_min": 8944.83027267456,
-      "importance_max": 21688.91334915161
+      "importance_mean": 116025.39687995911,
+      "importance_std": 11551.429017023826,
+      "importance_min": 99482.9870262146,
+      "importance_max": 135338.1133003235
     },
     {
-      "feature": "expected_goals_roll4",
-      "importance_mean": 16106.251007080078,
-      "importance_std": 1547.6797441706185,
-      "importance_min": 13679.92833328247,
-      "importance_max": 17485.003925323486
+      "feature": "transfers_in",
+      "importance_mean": 105737.51074552536,
+      "importance_std": 6459.214031027465,
+      "importance_min": 93489.98981666565,
+      "importance_max": 110939.6044883728
     },
     {
-      "feature": "transfers_balance",
-      "importance_mean": 15614.111026000977,
-      "importance_std": 1492.4252817597767,
-      "importance_min": 13764.250350952148,
-      "importance_max": 18160.20948410034
-    },
-    {
-      "feature": "threat_roll4",
-      "importance_mean": 14244.792532348632,
-      "importance_std": 2090.294844573957,
-      "importance_min": 10615.016609191895,
-      "importance_max": 16926.501350402832
+      "feature": "value",
+      "importance_mean": 80818.11432385445,
+      "importance_std": 6326.848514297683,
+      "importance_min": 69841.00733184814,
+      "importance_max": 89505.36287117004
     },
     {
       "feature": "selected_by_percent",
-      "importance_mean": 14193.933485031128,
-      "importance_std": 798.0929169850159,
-      "importance_min": 12871.34094619751,
-      "importance_max": 15150.48657989502
+      "importance_mean": 77549.38685929179,
+      "importance_std": 4989.646568961669,
+      "importance_min": 70667.94013595581,
+      "importance_max": 82282.83507332206
     },
     {
-      "feature": "transfers_out",
-      "importance_mean": 13949.160536193847,
-      "importance_std": 2244.567255243144,
-      "importance_min": 10218.945457458496,
-      "importance_max": 16896.315830230713
+      "feature": "goals_conceded",
+      "importance_mean": 76870.3358215332,
+      "importance_std": 5995.266416963974,
+      "importance_min": 67070.84306812286,
+      "importance_max": 83186.54220294952
+    },
+    {
+      "feature": "transfers_balance",
+      "importance_mean": 74608.6781104505,
+      "importance_std": 4951.530255623418,
+      "importance_min": 68550.84005260468,
+      "importance_max": 82546.69561386108
     },
     {
       "feature": "bps_roll4",
-      "importance_mean": 12576.772421264648,
-      "importance_std": 1818.969078041938,
-      "importance_min": 9242.566593170166,
-      "importance_max": 14256.459678649902
+      "importance_mean": 72715.7189479828,
+      "importance_std": 6871.397002248634,
+      "importance_min": 61128.59749221802,
+      "importance_max": 81375.46187591553
+    },
+    {
+      "feature": "transfers_out",
+      "importance_mean": 71665.85597229004,
+      "importance_std": 3756.571884684325,
+      "importance_min": 65280.841091156006,
+      "importance_max": 76833.0467748642
+    },
+    {
+      "feature": "expected_assists_roll4",
+      "importance_mean": 70741.48762922287,
+      "importance_std": 2788.277783948534,
+      "importance_min": 65266.832721710205,
+      "importance_max": 73010.70252752304
+    },
+    {
+      "feature": "expected_goals_roll4",
+      "importance_mean": 68685.97540550232,
+      "importance_std": 4534.001482416693,
+      "importance_min": 62984.51794242859,
+      "importance_max": 75562.6407585144
     },
     {
       "feature": "total_points_roll4_std",
-      "importance_mean": 12159.463814544677,
-      "importance_std": 1807.8477511146862,
-      "importance_min": 9508.236465454102,
-      "importance_max": 14511.295463562012
+      "importance_mean": 67820.0056503296,
+      "importance_std": 6823.553265245529,
+      "importance_min": 58103.450370788574,
+      "importance_max": 75458.56530189514
     },
     {
       "feature": "creativity_roll4",
-      "importance_mean": 12024.617874908447,
-      "importance_std": 1816.2040242153378,
-      "importance_min": 9796.33729171753,
-      "importance_max": 14292.189422607422
+      "importance_mean": 65488.20154018402,
+      "importance_std": 6304.799683181306,
+      "importance_min": 57864.42922210693,
+      "importance_max": 75618.26651859283
+    },
+    {
+      "feature": "threat_roll4",
+      "importance_mean": 65439.56047277451,
+      "importance_std": 7293.786804446344,
+      "importance_min": 55719.513092041016,
+      "importance_max": 75628.02176618576
     },
     {
       "feature": "influence_roll4",
-      "importance_mean": 8386.416917419434,
-      "importance_std": 2131.2638389598847,
-      "importance_min": 6324.485805511475,
-      "importance_max": 12392.440299987793
+      "importance_mean": 57891.67176883221,
+      "importance_std": 6933.9566875358505,
+      "importance_min": 48729.94350814819,
+      "importance_max": 68923.93002510071
     },
     {
       "feature": "opponent",
-      "importance_mean": 6034.09778137207,
-      "importance_std": 1038.7468065675114,
-      "importance_min": 4483.634479522705,
-      "importance_max": 7499.053199768066
+      "importance_mean": 32081.593079018592,
+      "importance_std": 3056.33344765414,
+      "importance_min": 27209.051275253296,
+      "importance_max": 34763.05373489857
     },
     {
       "feature": "form",
-      "importance_mean": 3099.642999267578,
-      "importance_std": 1341.3611440139125,
-      "importance_min": 1441.0823059082031,
-      "importance_max": 4514.551284790039
+      "importance_mean": 20422.29364242554,
+      "importance_std": 1543.268462234569,
+      "importance_min": 18149.880252838135,
+      "importance_max": 22886.909225463867
     },
     {
       "feature": "clean_sheets_roll4",
-      "importance_mean": 2976.970983123779,
-      "importance_std": 772.7529100965207,
-      "importance_min": 2245.7963218688965,
-      "importance_max": 4040.571891784668
+      "importance_mean": 14382.268619918823,
+      "importance_std": 2497.6026264109814,
+      "importance_min": 11472.271718978882,
+      "importance_max": 18990.911432266235
     },
     {
       "feature": "yellow_cards",
-      "importance_mean": 2112.267399597168,
-      "importance_std": 321.63558627166526,
-      "importance_min": 1760.6930885314941,
-      "importance_max": 2664.7049980163574
+      "importance_mean": 9339.329224014282,
+      "importance_std": 1806.302174123945,
+      "importance_min": 6655.934099197388,
+      "importance_max": 11953.141286849976
     }
   ],
   "feature_categories": {

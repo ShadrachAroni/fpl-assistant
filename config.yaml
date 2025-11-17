@@ -135,6 +135,15 @@ simulation:
       - "Tottenham Hotspur"    # Postecoglou tinkering
       - "Brighton and Hove Albion"
       - "Newcastle United"
+    rotation_monitor:
+      enabled: true
+      window_gameweeks: 5
+      starter_minutes: 55
+      prone_threshold: 0.4
+      cache_path: "data/rotation_watch.json"
+      summary_cache_dir: "data/cache/player_history"
+      summary_cache_hours: 6
+      fallback_rotation_score: 0.45
     
     # Yellow card suspension thresholds
     yellow_card_thresholds:
@@ -287,6 +296,39 @@ contextual_intel:
       - "Newcastle United"
     conference_league:
       - "Aston Villa"
+  manager_directory:
+    "Arsenal": "Mikel Arteta"
+    "Aston Villa": "Unai Emery"
+    "AFC Bournemouth": "Andoni Iraola"
+    "Bournemouth": "Andoni Iraola"
+    "Brentford": "Thomas Frank"
+    "Brighton and Hove Albion": "Fabian Huerzeler"
+    "Brighton": "Fabian Huerzeler"
+    "Chelsea": "Enzo Maresca"
+    "Crystal Palace": "Oliver Glasner"
+    "Everton": "Sean Dyche"
+    "Fulham": "Marco Silva"
+    "Ipswich Town": "Kieran McKenna"
+    "Leicester City": "Steve Cooper"
+    "Leeds": "Daniel Farke"
+    "Liverpool": "Arne Slot"
+    "Manchester City": "Pep Guardiola"
+    "Man City": "Pep Guardiola"
+    "Manchester United": "Erik ten Hag"
+    "Man Utd": "Erik ten Hag"
+    "Newcastle United": "Eddie Howe"
+    "Newcastle": "Eddie Howe"
+    "Nottingham Forest": "Nuno Espírito Santo"
+    "Nott'm Forest": "Nuno Espírito Santo"
+    "Southampton": "Russell Martin"
+    "Tottenham Hotspur": "Ange Postecoglou"
+    "Spurs": "Ange Postecoglou"
+    "West Ham United": "Julen Lopetegui"
+    "West Ham": "Julen Lopetegui"
+    "Wolverhampton Wanderers": "Gary O'Neil"
+    "Wolves": "Gary O'Neil"
+    "Burnley": "Vincent Kompany"
+    "Sunderland": "Michael Beale"
 
 # Model performance reporting targets
 model_performance:
