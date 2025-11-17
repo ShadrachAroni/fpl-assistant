@@ -7,7 +7,35 @@ sources:
   xg_source: "understat"
   sportmonks:
     base_url: "https://api.sportmonks.com"
+    api_token: "${SPORTMONKS_API_TOKEN}"
+    injuries_endpoint: "v3/football/injuries"
+    league_ids: [8, 271]           # Premier League + International competitions
+    include_player_details: true
     use_xg_endpoint: true
+
+news_intel:
+  poll_minutes: 10
+  keywords:
+    - "injury"
+    - "doubt"
+    - "ruled out"
+    - "hamstring"
+    - "knock"
+  gnews:
+    api_key: "01fa88c6ba3741714168aa09ecd180d1"
+    lang: "en"
+    country: "gb"
+  newsapi:
+    api_key: "b65276f9b7e04a5aa3362805bcb06cf8"
+    country: "gb"
+    category: "sports"
+  rss:
+    - name: "BBC Sport"
+      url: "https://feeds.bbci.co.uk/sport/football/rss.xml"
+    - name: "The Guardian"
+      url: "https://www.theguardian.com/football/rss"
+    - name: "Sky Sports"
+      url: "https://www.skysports.com/rss/12040"
 
 training:
   target_window_gw: 1
@@ -15,12 +43,35 @@ training:
   n_splits_cv: 5
   include_fixture_difficulty: true
   output_column: "predicted_points_next_gw"
+  bayesian_form_confidence: 0.7
+  use_position_models: true
+  optimize: true
+  optimize_trials: 40
+
+understat:
+  season: "2024"
+  refresh_hours: 6
 
 simulation:
   # ✅ OPTIMAL HORIZONS - Based on FPL dynamics
   planning_horizon: 5                    # Transfer planning (sweet spot for reliability)
   chip_analysis_horizon: 10              # Chip timing (catch DGW announcements)
   fixture_analysis_horizon: 8            # Fixture runs (identify swings)
+
+  # Multi-objective optimization weights (sum to 1.0)
+  multi_objective_weights:
+    points: 0.35
+    safety: 0.20
+    value: 0.15
+    differential: 0.15
+    fixtures: 0.15
+
+  # Monte Carlo simulation settings
+  monte_carlo:
+    enabled: true
+    simulations: 1200
+    percentile_floor: 10
+    percentile_ceiling: 90
   
   # Confidence decay (reduce weight for distant GWs)
   use_horizon_decay: true
@@ -78,9 +129,12 @@ simulation:
     
     # Rotation-prone managers (known for heavy rotation)
     rotation_prone_teams:
-      - "Man City"      # Guardiola - Pep roulette
-      - "Chelsea"       # Pochettino
-      - "Liverpool"     # Klopp rotation
+      - "Manchester City"      # Guardiola - Pep roulette
+      - "Chelsea"              # High rotation
+      - "Liverpool"            # Slot era rotation
+      - "Tottenham Hotspur"    # Postecoglou tinkering
+      - "Brighton and Hove Albion"
+      - "Newcastle United"
     
     # Yellow card suspension thresholds
     yellow_card_thresholds:
@@ -184,6 +238,63 @@ simulation:
 cache:
   enabled: true
   path: "./.cache/db.sqlite"
+
+# External injury intelligence
+injury_intel:
+  external_sources_enabled: true
+  refresh_minutes: 60
+  fallback_chance_percent: 25
+  high_severity_threshold: 0.85
+  medium_severity_threshold: 0.6
+  default_severity: 0.75
+  priority_competitions:
+    - "Premier League"
+    - "UEFA Champions League"
+    - "UEFA Europa League"
+    - "International"
+  premier_league_api:
+    comp_seasons: [719]
+    page_size: 40
+
+lineup_intel:
+  enabled: true
+  refresh_minutes: 20
+  pre_kickoff_window_minutes: 180
+  allow_historical_lookup: true
+
+# Market intelligence controls
+market_intelligence:
+  price_rise_base_threshold: 100000         # Baseline transfers for price change
+  threshold_multiplier: 1.2                 # Multiplier for "rising tonight"
+  likely_multiplier: 0.8                    # Multiplier for "likely rising"
+  template_penalty_captain: 0.5             # Penalty for template captains
+  template_penalty_player: 0.3              # Penalty for template players
+
+# Real-world context inputs
+contextual_intel:
+  manager_changes:
+    "Chelsea": 2        # GW since manager change
+    "Manchester United": 5
+    "Brighton and Hove Albion": 1
+  european_competitions:
+    champions_league:
+      - "Manchester City"
+      - "Arsenal"
+      - "Liverpool"
+      - "Chelsea"
+    europa_league:
+      - "Tottenham Hotspur"
+      - "Newcastle United"
+    conference_league:
+      - "Aston Villa"
+
+# Model performance reporting targets
+model_performance:
+  min_score: 90.0
+  target_rmse: 2.0
+  target_mae: 1.2
+  target_r2: 0.65
+  baseline_points: 6.0
 
 # Logging Configuration
 logging:

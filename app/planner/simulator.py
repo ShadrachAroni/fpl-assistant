@@ -72,6 +72,20 @@ class TransferSimulator:
         self.chip_horizon = int(sim_cfg.get("chip_analysis_horizon", 10))
         self.max_transfers = int(sim_cfg.get("max_transfers_per_gw", 2))
         self.hit_penalty = float(sim_cfg.get("transfer_cost", 4.0))
+
+        self.market_cfg = config.get("market_intelligence", {})
+        self.multi_objective_weights = sim_cfg.get("multi_objective_weights", {
+            "points": 0.35,
+            "safety": 0.20,
+            "value": 0.15,
+            "differential": 0.15,
+            "fixtures": 0.15
+        })
+        mc_cfg = sim_cfg.get("monte_carlo", {})
+        self.monte_carlo_enabled = mc_cfg.get("enabled", True)
+        self.monte_carlo_simulations = int(mc_cfg.get("simulations", 1000))
+        self.monte_carlo_floor = int(mc_cfg.get("percentile_floor", 10))
+        self.monte_carlo_ceiling = int(mc_cfg.get("percentile_ceiling", 90))
         
         # Transfer risk config
         risk_cfg = sim_cfg.get("transfer_risk", {})
@@ -388,23 +402,29 @@ class TransferSimulator:
             squad[f"pred_gw{gw}"] = 0.0
             return squad
 
+        pred_col = f"pred_gw{gw}"
+
         try:
-            preds = self.predictor.predict(squad)
-            squad[f"pred_gw{gw}"] = preds
-            
-            if gw in self.fixture_diff_by_gw:
-                fixture_map = self.fixture_diff_by_gw[gw]
-                squad["_fixture_diff"] = squad["team"].map(fixture_map).fillna(3)
-                
-                squad[f"pred_gw{gw}"] = squad.apply(
-                    lambda row: row[f"pred_gw{gw}"] * (1.2 if row["_fixture_diff"] <= 2 else 0.85 if row["_fixture_diff"] >= 4 else 1.0),
-                    axis=1
+            if pred_col in squad.columns:
+                preds = squad[pred_col].to_numpy(copy=True)
+            else:
+                preds = self.predictor.predict(squad)
+                squad[pred_col] = preds
+
+            fixture_map = self.fixture_diff_by_gw.get(gw)
+            if fixture_map:
+                difficulty = squad["team"].map(fixture_map).fillna(self.DEFAULT_FIXTURE_DIFFICULTY).to_numpy()
+                weights = np.where(
+                    difficulty <= 2,
+                    1.20,
+                    np.where(difficulty >= 4, 0.85, 1.0)
                 )
-                squad.drop("_fixture_diff", axis=1, inplace=True)
-                
+                preds = preds * weights
+
+            squad[pred_col] = preds
         except Exception as e:
             logger.debug(f"Prediction failed for GW{gw}: {e}")
-            squad[f"pred_gw{gw}"] = 0.0
+            squad[pred_col] = 0.0
 
         return squad
 
@@ -443,6 +463,15 @@ class TransferSimulator:
         
         all_with_pred["risk_adjusted_score"] = all_with_pred.apply(
             lambda row: self._calculate_risk_adjusted_score(row, pred_col),
+            axis=1
+        )
+
+        current_with_pred["multi_objective_score"] = current_with_pred.apply(
+            lambda row: self._calculate_multi_objective_score(row, pred_col),
+            axis=1
+        )
+        all_with_pred["multi_objective_score"] = all_with_pred.apply(
+            lambda row: self._calculate_multi_objective_score(row, pred_col),
             axis=1
         )
 
@@ -522,12 +551,23 @@ class TransferSimulator:
                 cost_diff = float(candidate["cost_diff"])
                 ownership_diff = float(candidate["ownership_differential"])
                 price_value = float(candidate["price_value"])
+                multi_gain = float(candidate["multi_objective_score"] - weak_player["multi_objective_score"])
                 
                 cand_risk_summary = self._get_player_risk_summary(candidate)
                 cand_total_risk = float(candidate.get("total_risk", 0.0))
+                cand_ownership = float(candidate.get("selected_by_percent", 0))
+                weak_ownership = float(weak_player.get("selected_by_percent", 0))
+                regret_penalty = self._calculate_transfer_regret(weak_player, candidate)
                 
                 # Calculate ENHANCED net gain (includes price changes)
-                net_gain = predicted_gain + (price_value * 5)  # Weight price changes
+                template_penalty = self._calculate_template_penalty(cand_ownership)
+                net_gain = (
+                    predicted_gain +
+                    (multi_gain * 0.5) +
+                    (price_value * 5) -
+                    template_penalty -
+                    regret_penalty
+                )
                 
                 # Check for price warnings
                 cand_price_rise_prob = float(candidate.get("price_rise_probability", 0))
@@ -550,8 +590,6 @@ class TransferSimulator:
                 
                 # Ownership analysis
                 ownership_note = ""
-                cand_ownership = float(candidate.get("selected_by_percent", 0))
-                weak_ownership = float(weak_player.get("selected_by_percent", 0))
                 
                 if cand_ownership > 50:
                     ownership_note = f"🔴 Essential ({cand_ownership:.1f}% owned)"
@@ -581,8 +619,11 @@ class TransferSimulator:
                     "ownership_note": ownership_note,
                     "price_warning": price_warning,
                     "predicted_gain": predicted_gain,
+                    "multi_objective_gain": multi_gain,
                     "cost_diff": cost_diff,
                     "net_gain": net_gain,
+                    "regret_penalty": regret_penalty,
+                    "template_penalty": template_penalty,
                     "hit": 0,
                     "hit_penalty": 0.0
                 }
@@ -616,6 +657,87 @@ class TransferSimulator:
         impact = price_fall_prob - price_rise_prob
         
         return impact
+
+    def _calculate_multi_objective_score(self, player: pd.Series, pred_col: str) -> float:
+        """Compute Pareto-style score across points, safety, value, differential, fixtures."""
+        weights = self.multi_objective_weights
+        expected_points = float(player.get(pred_col, 0.0))
+        safety = max(0.0, 1 - float(player.get("total_risk", 0.0)))
+        value = float(player.get("points_per_million", 0.0))
+        differential = float(player.get("differential_score", 0.0))
+        fixtures = float(player.get("future_fixture_quality", 0.0))
+
+        score = (
+            expected_points * weights.get("points", 0.3) +
+            safety * weights.get("safety", 0.2) +
+            value * weights.get("value", 0.15) +
+            differential * weights.get("differential", 0.15) +
+            fixtures * weights.get("fixtures", 0.2)
+        )
+        return score
+
+    def _calculate_transfer_regret(
+        self,
+        player_out: pd.Series,
+        player_in: pd.Series,
+        horizon: int = 5
+    ) -> float:
+        """Estimate regret if recommended transfer backfires."""
+        out_upside = float(player_out.get("risk_adjusted_score", 0.0)) + \
+            float(player_out.get("points_std_dev", 1.0)) * 1.5
+        in_downside = max(
+            0.0,
+            float(player_in.get("risk_adjusted_score", 0.0)) -
+            float(player_in.get("points_std_dev", 1.0))
+        )
+        return max(0.0, out_upside - in_downside)
+
+    def _calculate_template_penalty(self, ownership: float, is_captaincy: bool = False) -> float:
+        """Apply market-based penalty for template selections."""
+        if is_captaincy:
+            eo = ownership * 0.02
+            if eo > 1.0:
+                return float(self.market_cfg.get("template_penalty_captain", 0.5))
+        if ownership > 50:
+            return float(self.market_cfg.get("template_penalty_player", 0.3))
+        return 0.0
+
+    def _run_monte_carlo(self, squad: pd.DataFrame, gw: int) -> Dict[str, float]:
+        """Monte Carlo simulation for squad outcomes."""
+        if not self.monte_carlo_enabled or squad.empty:
+            return {}
+
+        working = self._apply_predictions_with_fixture_weighting(squad, gw)
+        pred_col = f"pred_gw{gw}"
+        if pred_col not in working.columns:
+            return {}
+
+        preds = working[pred_col].fillna(0).values
+        stds = working.get("points_std_dev", pd.Series(1.0, index=working.index)).fillna(1.0).values
+        injury = working.get("injury_risk", pd.Series(0, index=working.index)).fillna(0).values
+        rotation = working.get("rotation_risk", pd.Series(0, index=working.index)).fillna(0).values
+
+        simulations = []
+        for _ in range(self.monte_carlo_simulations):
+            sample = np.random.normal(preds, stds)
+            injury_events = np.random.rand(len(sample)) < injury
+            rotation_events = np.random.rand(len(sample)) < rotation
+            sample[injury_events] = 0
+            rotation_only = rotation_events & ~injury_events
+            sample[rotation_only] *= 0.3
+            simulations.append(sample.sum())
+
+        if not simulations:
+            return {}
+
+        sims = np.array(simulations)
+        return {
+            "expected": float(np.mean(sims)),
+            "median": float(np.median(sims)),
+            "p10": float(np.percentile(sims, self.monte_carlo_floor)),
+            "p90": float(np.percentile(sims, self.monte_carlo_ceiling)),
+            "variance": float(np.var(sims))
+        }
 
     def _validate_and_select_transfers(
         self, transfers: List[Dict[str, Any]], free_transfers: int
@@ -902,6 +1024,12 @@ class TransferSimulator:
             "risk_warnings_count": len(plan["risk_warnings"]),
             "price_warnings_count": len(plan["price_warnings"])
         }
+
+        plan["monte_carlo"] = self._run_monte_carlo(self.current, self.next_gw)
+        if plan["monte_carlo"]:
+            plan["summary"]["monte_carlo_expected"] = round(plan["monte_carlo"]["expected"], 1)
+            plan["summary"]["monte_carlo_p10"] = round(plan["monte_carlo"]["p10"], 1)
+            plan["summary"]["monte_carlo_p90"] = round(plan["monte_carlo"]["p90"], 1)
 
         logger.info(f"✅ Plan complete: {total_transfers} transfer(s)")
         if plan["captain_recommendation"]:

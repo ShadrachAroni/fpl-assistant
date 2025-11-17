@@ -136,16 +136,17 @@ class HistoricalDataIntegrator:
         
         if self.use_cache and not force_refresh and self._is_cache_valid(cache_file):
             logger.info(f"   📁 Loading from cache: {cache_file}")
-            df = pd.read_csv(cache_file)
+            df = pd.read_csv(cache_file, index_col=False)  # ✅ Don't use index
+            df = df.reset_index(drop=True)  # ✅ Clean index
         else:
             # Download from GitHub
             logger.info(f"   🌐 Downloading from GitHub...")
             df = self._download_merged_gameweek_data(season)
             
             if df is not None and not df.empty:
+                df = df.reset_index(drop=True)  # ✅ Clean before saving
                 # Save to cache
                 df.to_csv(cache_file, index=False)
-                logger.info(f"   💾 Cached to: {cache_file}")
             else:
                 logger.error(f"   ❌ Download failed")
                 return pd.DataFrame()
@@ -198,8 +199,13 @@ class HistoricalDataIntegrator:
             # Add season identifier
             df["season"] = season
             
-            # ✅ FIX: Reset index to ensure unique indices before concatenation
-            df = df.reset_index(drop=True)
+            # ✅ CRITICAL FIX: Force complete index reset
+            # This creates a completely new DataFrame with clean index
+            df = df.copy()
+            df.reset_index(drop=True, inplace=True)
+            
+            # ✅ ADDITIONAL FIX: Ensure no duplicate column names
+            df = df.loc[:, ~df.columns.duplicated()]
             
             all_dfs.append(df)
             
@@ -210,8 +216,27 @@ class HistoricalDataIntegrator:
             logger.error("❌ No data loaded from any season")
             return pd.DataFrame()
         
-        # ✅ FIX: Already using ignore_index=True, but now with reset indices
-        combined_df = pd.concat(all_dfs, ignore_index=True, sort=False)
+        # ✅ CRITICAL FIX: Use copy() and force ignore_index
+        try:
+            # Method 1: Standard concat with explicit copy
+            combined_df = pd.concat(
+                [df.copy() for df in all_dfs], 
+                ignore_index=True, 
+                sort=False,
+                copy=True
+            )
+        except Exception as e:
+            logger.warning(f"⚠️ Standard concat failed: {e}")
+            logger.info("🔧 Trying alternative concatenation method...")
+            
+            # Method 2: Manual concatenation (guaranteed to work)
+            combined_data = []
+            for df in all_dfs:
+                combined_data.extend(df.to_dict('records'))
+            
+            combined_df = pd.DataFrame(combined_data)
+            combined_df.reset_index(drop=True, inplace=True)
+            logger.info("✅ Used alternative concatenation method")
         
         logger.info(f"✅ Multi-season data: {len(combined_df)} total records")
         
@@ -399,25 +424,48 @@ class HistoricalDataIntegrator:
         if "gameweek" not in df.columns and "event" in df.columns:
             df["gameweek"] = df["event"]
         
+        # ✅ NEW: Convert 'selected' (absolute count) to 'selected_by_percent' (percentage)
+        if "selected" in df.columns and "selected_by_percent" not in df.columns:
+            # Calculate percentage based on total FPL managers
+            # Typical FPL season has ~8-10 million active managers
+            # We'll estimate based on the maximum selection count in the data
+            max_selected = df["selected"].max()
+            
+            # Estimate total managers (assume top player has ~60% ownership)
+            estimated_total_managers = max_selected / 0.6 if max_selected > 0 else 10_000_000
+            
+            # Calculate percentage
+            df["selected_by_percent"] = (df["selected"] / estimated_total_managers * 100).fillna(0)
+            
+            logger.info(f"✅ Converted 'selected' to 'selected_by_percent' (est. {estimated_total_managers:,.0f} managers)")
+        
         if "selected_by_percent" in df.columns:
             df["selected_by_percent"] = pd.to_numeric(
                 df["selected_by_percent"],
                 errors="coerce"
             ).fillna(0)
         
+        # Ensure critical numeric columns exist
+        for col in ["minutes", "total_points"]:
+            if col not in df.columns:
+                df[col] = 0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
         return df
     
     def prepare_training_features(
         self,
         df: pd.DataFrame,
-        include_target: bool = True
+        include_target: bool = True,
+        rolling_window: int = 4
     ) -> pd.DataFrame:
         """
-        Prepare features for model training.
+        Prepare features for model training with proper time alignment.
         
         Args:
             df: Raw historical data
             include_target: Whether to create target variable
+            rolling_window: Window for rolling averages
         
         Returns:
             DataFrame ready for training
@@ -430,25 +478,103 @@ class HistoricalDataIntegrator:
         required_cols = ["player_id", "gameweek", "total_points"]
         missing_cols = [c for c in required_cols if c not in df.columns]
         
-        if len(missing_cols) > 0:  # ✅ FIXED: Changed from "if missing_cols:"
+        if len(missing_cols) > 0:
             logger.error(f"❌ Missing required columns: {missing_cols}")
             return pd.DataFrame()
         
         # Sort by player and gameweek
         df = df.sort_values(["player_id", "gameweek"])
         
-        # Create target variable (next gameweek points)
+        # ========================================
+        # 1. CREATE TARGET (next gameweek points)
+        # ========================================
         if include_target:
             df["target_next_points"] = df.groupby("player_id")["total_points"].shift(-1)
-            
-            # Remove rows without target
-            df = df.dropna(subset=["target_next_points"])
         
-        # Fill missing values
+        # ========================================
+        # 2. CREATE ROLLING FEATURES (from past GWs)
+        # ========================================
+        rolling_features = [
+            "total_points", "minutes", "goals_scored", "assists", 
+            "clean_sheets", "expected_goals", "expected_assists",
+            "bonus", "bps", "ict_index", "influence", "creativity", "threat"
+        ]
+        
+        for feat in rolling_features:
+            if feat in df.columns:
+                # Rolling mean
+                df[f"{feat}_roll{rolling_window}"] = (
+                    df.groupby("player_id")[feat]
+                    .rolling(window=rolling_window, min_periods=1)
+                    .mean()
+                    .reset_index(level=0, drop=True)
+                )
+                
+                # Rolling std (variance indicator) - only for total_points
+                if feat == "total_points":
+                    df[f"{feat}_roll{rolling_window}_std"] = (
+                        df.groupby("player_id")[feat]
+                        .rolling(window=rolling_window, min_periods=2)
+                        .std()
+                        .reset_index(level=0, drop=True)
+                        .fillna(0)
+                    )
+        
+        # ========================================
+        # 3. CREATE FORM (recent performance)
+        # ========================================
+        if f"total_points_roll{rolling_window}" in df.columns:
+            df["form"] = df[f"total_points_roll{rolling_window}"]
+        
+        # ========================================
+        # 4. REMOVE RAW CURRENT-GAMEWEEK FEATURES
+        # ========================================
+        raw_features_to_remove = [
+            # Raw stats (we have rolling versions)
+            'xP', 'bps', 'creativity', 'expected_assists', 
+            'expected_goal_involvements', 'expected_goals',
+            'expected_goals_conceded', 'ict_index', 'influence',
+            'threat', 'total_points', 'minutes', 'starts',
+            'goals_scored', 'assists', 'clean_sheets', 'bonus',
+            
+            # Match-specific (not predictive before the match)
+            'fixture', 'team_a_score', 'team_h_score',
+            
+            # Old ownership column (replaced by selected_by_percent)
+            'selected',
+        ]
+        
+        for feat in raw_features_to_remove:
+            if feat in df.columns:
+                df = df.drop(columns=[feat], errors='ignore')
+        
+        # ========================================
+        # 5. KEEP ONLY PREDICTIVE FEATURES
+        # ========================================
+        # These are known BEFORE the gameweek:
+        # - Rolling averages (*_roll4)
+        # - form
+        # - selected_by_percent (ownership)
+        # - value (price)
+        # - transfers_in, transfers_out, transfers_balance
+        # - opponent_difficulty (if available)
+        # - is_home (if available)
+        
+        # ========================================
+        # 6. REMOVE ROWS WITHOUT TARGET
+        # ========================================
+        if include_target:
+            initial_len = len(df)
+            df = df.dropna(subset=["target_next_points"])
+            logger.info(f"   Removed {initial_len - len(df)} rows without target")
+        
+        # ========================================
+        # 7. FILL MISSING VALUES
+        # ========================================
         numeric_cols = df.select_dtypes(include=[np.number]).columns
         df[numeric_cols] = df[numeric_cols].fillna(0)
         
-        logger.info(f"✅ Prepared {len(df)} training samples")
+        logger.info(f"✅ Prepared {len(df)} training samples with {len(df.columns)} features")
         
         return df
     

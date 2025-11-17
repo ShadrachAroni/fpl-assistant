@@ -83,6 +83,7 @@ class Predictor:
                 "oof_mae": data.get("oof_mae"),
                 "oof_r2": data.get("oof_r2")
             }
+            self.position_models = data.get("position_models", {})
         else:
             # Legacy format
             self.models = [data]
@@ -90,6 +91,7 @@ class Predictor:
             self.feature_importance = {}
             self.training_date = None
             self.training_metrics = {}
+            self.position_models = {}
 
         if not self.models:
             raise ValueError("❌ No valid LightGBM models found in the saved file.")
@@ -145,7 +147,11 @@ class Predictor:
         X = self._prepare_features(df)
 
         # Get base predictions from ensemble
-        base_preds = self._predict_ensemble(X)
+        base_preds = (
+            self._predict_with_position_models(df, X)
+            if getattr(self, "position_models", None)
+            else self._predict_model_list(self.models, X)
+        )
 
         # Apply enhancements
         enhanced_preds = base_preds.copy()
@@ -180,6 +186,34 @@ class Predictor:
         )
 
         return enhanced_preds
+
+    def _predict_model_list(self, model_list, X_matrix) -> np.ndarray:
+        if not model_list:
+            return np.zeros(len(X_matrix))
+        preds = []
+        for model in model_list:
+            preds.append(model.predict(X_matrix, num_iteration=getattr(model, "best_iteration", None)))
+        return np.mean(preds, axis=0)
+
+    def _predict_with_position_models(self, df: pd.DataFrame, X: pd.DataFrame) -> np.ndarray:
+        if "position" not in df.columns or not self.position_models:
+            return self._predict_model_list(self.models, X)
+
+        preds = np.zeros(len(df))
+        used_mask = np.zeros(len(df), dtype=bool)
+        positions = df["position"].fillna("UNK")
+
+        for pos_label, pack in self.position_models.items():
+            mask = positions == pos_label
+            if not mask.any():
+                continue
+            preds[mask] = self._predict_model_list(pack.get("models", []), X[mask])
+            used_mask |= mask
+
+        if not used_mask.all():
+            preds[~used_mask] = self._predict_model_list(self.models, X[~used_mask])
+
+        return preds
 
     def predict_with_confidence(
         self, 

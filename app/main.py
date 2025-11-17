@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import yaml
 import pandas as pd
@@ -32,6 +32,11 @@ from app.models.trainer import train_lightgbm
 from app.models.predictor import Predictor
 from app.planner.simulator import TransferSimulator
 from app.api_client.fpl_client import FPLClient
+from app.api_client.sportmonks_client import SportmonksClient
+from app.api_client.understat_client import UnderstatClient
+from app.api_client.pl_injury_client import PremierLeagueInjuryClient
+from app.api_client.bbc_client import BBCLineupClient
+from app.api_client.news_client import GNewsClient, NewsAPIClient, RSSClient
 from app.schemas import (
     DetailedRecommendation, 
     TransferItem, 
@@ -44,7 +49,8 @@ from app.schemas import (
     PriceIntelligence,
     FormationAnalysis,
     EffectiveOwnership,
-    ModelPerformance
+    ModelPerformance,
+    MonteCarloInsight
 )
 
 # ==================== CONFIGURATION ====================
@@ -56,6 +62,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
+
+# Silence very chatty HTTP/client libraries
+for noisy_logger in ("httpx", "httpcore", "urllib3"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 logger = logging.getLogger("fpl_assistant")
 
@@ -86,7 +96,88 @@ def startup_event() -> None:
         app.state.fpl_client = FPLClient()
         logger.info("✅ FPLClient initialized")
         
-        app.state.pipeline = DataPipeline(CONFIG, fpl_client=app.state.fpl_client)
+        sportmonks_client = None
+        sportmonks_cfg = CONFIG.get("sources", {}).get("sportmonks", {})
+        sportmonks_token = sportmonks_cfg.get("api_token") or os.getenv("SPORTMONKS_API_TOKEN")
+
+        if sportmonks_token:
+            try:
+                sportmonks_client = SportmonksClient(
+                    base_url=sportmonks_cfg.get("base_url", "https://api.sportmonks.com"),
+                    api_token=sportmonks_token,
+                    injuries_endpoint=sportmonks_cfg.get("injuries_endpoint", "v3/football/injuries")
+                )
+                logger.info("✅ Sportmonks client initialized")
+            except Exception as exc:
+                logger.warning(f"⚠️ Sportmonks client unavailable: {exc}")
+
+        understat_client = None
+        try:
+            understat_client = UnderstatClient()
+            logger.info("✅ Understat client initialized")
+        except Exception as exc:
+            logger.warning(f"⚠️ Understat client unavailable: {exc}")
+
+        pl_injury_client = None
+        injury_cfg = CONFIG.get("injury_intel", {})
+        pl_cfg = injury_cfg.get("premier_league_api", {})
+        if injury_cfg.get("external_sources_enabled", True):
+            try:
+                pl_injury_client = PremierLeagueInjuryClient(
+                    comp_seasons=pl_cfg.get("comp_seasons"),
+                    page_size=pl_cfg.get("page_size", 40),
+                )
+                logger.info("✅ Premier League injury client initialized")
+            except Exception as exc:
+                logger.warning(f"⚠️ Premier League injury client unavailable: {exc}")
+
+        bbc_client = None
+        lineup_cfg = CONFIG.get("lineup_intel", {})
+        if lineup_cfg.get("enabled", False):
+            try:
+                bbc_client = BBCLineupClient()
+                logger.info("✅ BBC lineup client initialized")
+            except Exception as exc:
+                logger.warning(f"⚠️ BBC lineup client unavailable: {exc}")
+
+        news_cfg = CONFIG.get("news_intel", {})
+        gnews_client = None
+        newsapi_client = None
+        rss_client = None
+
+        if news_cfg:
+            g_cfg = news_cfg.get("gnews", {})
+            n_cfg = news_cfg.get("newsapi", {})
+            rss_cfg = news_cfg.get("rss", [])
+
+            if g_cfg.get("api_key"):
+                gnews_client = GNewsClient(
+                    api_key=g_cfg["api_key"],
+                    lang=g_cfg.get("lang", "en"),
+                    country=g_cfg.get("country")
+                )
+
+            if n_cfg.get("api_key"):
+                newsapi_client = NewsAPIClient(
+                    api_key=n_cfg["api_key"],
+                    country=n_cfg.get("country", "gb"),
+                    category=n_cfg.get("category", "sports")
+                )
+
+            if rss_cfg:
+                rss_client = RSSClient(rss_cfg)
+
+        app.state.pipeline = DataPipeline(
+            CONFIG,
+            fpl_client=app.state.fpl_client,
+            understat_client=understat_client,
+            sportmonks_client=sportmonks_client,
+            pl_injury_client=pl_injury_client,
+            bbc_client=bbc_client,
+            gnews_client=gnews_client,
+            newsapi_client=newsapi_client,
+            rss_client=rss_client,
+        )
         logger.info("✅ Pipeline initialized")
         
         app.state.pipeline.fetch_bootstrap()
@@ -252,6 +343,95 @@ def _build_player_reasoning(row: pd.Series, next_gw: int) -> str:
         reasons.append("Medium risk")
 
     return " | ".join(reasons)
+
+
+def _build_player_pick_summary(picks: List[PlayerPick]) -> List[str]:
+    """Summarize recommended picks for quick scanning."""
+    if not picks:
+        return []
+
+    top_points = sorted(picks, key=lambda p: p.predicted_points_next_gw, reverse=True)[:3]
+    top_text = ", ".join(f"{p.player_name} ({p.predicted_points_next_gw:.1f})" for p in top_points)
+
+    differentials = [
+        p for p in picks
+        if p.ownership_intel and p.ownership_intel.is_differential
+    ][:2]
+    diff_text = ", ".join(f"{p.player_name} ({p.predicted_points_next_gw:.1f})" for p in differentials) or "None"
+
+    value_candidates = [p for p in picks if p.current_price]
+    value_picks = sorted(
+        value_candidates,
+        key=lambda p: (p.current_price or 0) / max(p.predicted_points_next_gw, 0.1)
+    )[:2]
+    value_text = ", ".join(f"{p.player_name} (£{p.current_price:.1f}m)" for p in value_picks) or "None"
+
+    return [
+        f"Top points: {top_text}",
+        f"Differentials: {diff_text}",
+        f"Value picks: {value_text}"
+    ]
+
+
+def _assign_horizon_predictions(
+    df: pd.DataFrame,
+    predictor: Predictor,
+    start_gw: int,
+    horizon: int
+) -> None:
+    """
+    Populate pred_gw columns by running one model inference per DataFrame.
+    """
+    if df.empty:
+        return
+
+    preds = predictor.predict(df)
+
+    for offset in range(horizon):
+        df[f"pred_gw{start_gw + offset}"] = preds
+
+
+def _normalize_chip_advice(chip_advice: ChipAdvice) -> ChipAdvice:
+    """
+    Ensure 'No chip recommended' responses never carry an optimal GW.
+    """
+    if not chip_advice:
+        return chip_advice
+
+    if chip_advice.recommended_chip in (None, "No chip recommended"):
+        chip_advice.optimal_gw = None
+
+    return chip_advice
+
+
+def _enforce_transfer_risk_warning(
+    in_total_risk: Optional[float],
+    risk_summary: str,
+    existing_warning: Optional[str]
+) -> Optional[str]:
+    """Ensure risk warnings align with risk thresholds."""
+    if in_total_risk is None:
+        return None
+    message = risk_summary or "No detailed risk data"
+    if in_total_risk >= 0.6:
+        expected = f"🔴 HIGH RISK: {message}"
+    elif in_total_risk >= 0.4:
+        expected = f"🟡 MEDIUM RISK: {message}"
+    else:
+        return None
+    return existing_warning or expected
+
+
+def _validate_chip_advice_window(chip_advice: ChipAdvice, next_gw: int, horizon: int) -> ChipAdvice:
+    """Ensure chip advice contains a valid optimal GW within planning horizon."""
+    if not chip_advice or chip_advice.recommended_chip == "No chip recommended":
+        return chip_advice
+    optimal = chip_advice.optimal_gw
+    min_gw = next_gw
+    max_gw = next_gw + horizon
+    if optimal is None or optimal < min_gw or optimal > max_gw:
+        chip_advice.optimal_gw = min_gw
+    return chip_advice
 
 
 # ==================== API ENDPOINTS ====================
@@ -425,27 +605,29 @@ def recommend(manager_id: int) -> DetailedRecommendation:
         logger.info("🔮 STEP 6: Generating predictions...")
         horizon = int(CONFIG["simulation"].get("planning_horizon", 5))
 
-        for i in range(horizon):
-            gw = next_gw + i
-            col = f"pred_gw{gw}"
+        def _safe_assign_predictions(df: pd.DataFrame, label: str) -> None:
             try:
-                preds = predictor.predict(current_squad)
-                current_squad[col] = preds
-            except Exception as e:
-                logger.error(f"   ❌ Prediction failed for GW{gw}: {e}")
-                current_squad[col] = 0.0
+                _assign_horizon_predictions(df, predictor, next_gw, horizon)
+                logger.info(f"   ✅ {label}: predictions cached for {horizon} GW(s)")
+            except Exception as exc:
+                logger.error(
+                    f"   ❌ {label}: bulk prediction failed ({exc}). "
+                    "Falling back to per-GW inference."
+                )
+                for i in range(horizon):
+                    gw = next_gw + i
+                    col = f"pred_gw{gw}"
+                    try:
+                        preds = predictor.predict(df)
+                        df[col] = preds
+                    except Exception as inner_exc:
+                        logger.error(f"   ❌ {label}: Prediction failed for GW{gw}: {inner_exc}")
+                        df[col] = 0.0
 
-        for i in range(horizon):
-            gw = next_gw + i
-            col = f"pred_gw{gw}"
-            try:
-                preds = predictor.predict(players_df)
-                players_df[col] = preds
-            except Exception as e:
-                logger.error(f"   ❌ Prediction failed for GW{gw}: {e}")
-                players_df[col] = 0.0
+        _safe_assign_predictions(current_squad, "Current squad")
+        _safe_assign_predictions(players_df, "Global player pool")
 
-        logger.info(f"   ✅ Predictions complete for {horizon} gameweeks")
+        logger.info(f"   ✅ Predictions ready for {horizon} gameweeks")
 
         # ==================== STEP 7: Formation Validation ====================
         
@@ -504,6 +686,17 @@ def recommend(manager_id: int) -> DetailedRecommendation:
 
         plan = planner.plan_for_horizon()
         logger.info("   ✅ Transfer plan generated")
+
+        monte_carlo_data = plan.get("monte_carlo") or {}
+        monte_carlo_insight = None
+        if monte_carlo_data:
+            monte_carlo_insight = MonteCarloInsight(
+                expected=round(float(monte_carlo_data.get("expected", 0.0)), 2),
+                median=round(float(monte_carlo_data.get("median", 0.0)), 2),
+                p10=round(float(monte_carlo_data.get("p10", 0.0)), 2),
+                p90=round(float(monte_carlo_data.get("p90", 0.0)), 2),
+                variance=round(float(monte_carlo_data.get("variance", 0.0)), 2)
+            )
 
         # ==================== STEP 9: Captain Selection ====================
         
@@ -610,6 +803,9 @@ def recommend(manager_id: int) -> DetailedRecommendation:
         
         logger.info(f"   ✅ Built {len(recommended_picks)} player picks")
 
+        player_picks_summary = _build_player_pick_summary(recommended_picks)
+        player_pick_names = [pick.player_name for pick in recommended_picks]
+
         # ==================== STEP 12: Build Transfer Recommendations ====================
         
         logger.info("🔤 STEP 12: Building transfer recommendations...")
@@ -629,6 +825,9 @@ def recommend(manager_id: int) -> DetailedRecommendation:
             hit_val = int(t.get("hit", 0))
             predicted_gain = float(t.get("predicted_gain", 0.0))
             net_gain = float(t.get("net_gain_after_hit", predicted_gain))
+            multi_gain = float(t.get("multi_objective_gain", t.get("multi_gain", 0.0)))
+            regret_penalty = float(t.get("regret_penalty", 0.0))
+            template_penalty = float(t.get("template_penalty", 0.0))
 
             bank_cursor = round(bank_cursor - funds_diff, 1)
 
@@ -676,6 +875,8 @@ def recommend(manager_id: int) -> DetailedRecommendation:
                 risk_warning = f"🔴 HIGH RISK: {in_risk_summary}"
             elif in_total_risk > 0.4:
                 risk_warning = f"🟡 MEDIUM RISK: {in_risk_summary}"
+
+            risk_warning = _enforce_transfer_risk_warning(in_total_risk, in_risk_summary, risk_warning)
             
             # Ownership note
             ownership_note = t.get("ownership_note", "")
@@ -688,11 +889,17 @@ def recommend(manager_id: int) -> DetailedRecommendation:
             
             details_parts = [
                 hit_text,
-                f"Δ: {funds_diff:+.1f}m",
-                f"Bank: £{bank_cursor:.1f}m",
-                f"Gain: {net_gain:+.2f} pts",
-                f"Fixture: {fixture_upgrade}"
+                f"Bank £{bank_cursor:.1f}m ({funds_diff:+.1f}m)",
+                f"Gain {net_gain:+.2f} pts",
+                f"Pareto {multi_gain:+.2f}",
+                f"Fixture {fixture_upgrade}"
             ]
+
+            if regret_penalty > 0.1:
+                details_parts.append(f"Regret -{regret_penalty:.2f}")
+
+            if template_penalty > 0.0:
+                details_parts.append(f"Template penalty {template_penalty:.2f}")
             
             if ownership_note:
                 details_parts.append(ownership_note)
@@ -721,7 +928,10 @@ def recommend(manager_id: int) -> DetailedRecommendation:
                     ownership_note=ownership_note,
                     out_price_fall_prob=out_price_fall,
                     in_price_rise_prob=in_price_rise,
-                    price_warning=price_warning
+                    price_warning=price_warning,
+                    multi_objective_gain=multi_gain,
+                    regret_penalty=regret_penalty,
+                    template_penalty=template_penalty
                 )
             )
         
@@ -739,6 +949,8 @@ def recommend(manager_id: int) -> DetailedRecommendation:
             instructions=chip_rec.get("instructions", []),
             optimal_gw=chip_rec.get("optimal_gw")
         )
+        chip_advice = _validate_chip_advice_window(chip_advice, next_gw, horizon)
+        chip_advice = _normalize_chip_advice(chip_advice)
         
         logger.info(f"   ✅ Chip: {chip_advice.recommended_chip}")
 
@@ -789,7 +1001,10 @@ def recommend(manager_id: int) -> DetailedRecommendation:
             players_likely_to_fall=int(players_falling),
             squad_template_count=int(squad_template_count),
             squad_differential_count=int(squad_differential_count),
-            squad_average_ownership=round(float(squad_avg_ownership), 1)
+            squad_average_ownership=round(float(squad_avg_ownership), 1),
+            player_pick_summary=player_picks_summary,
+            player_pick_names=player_pick_names,
+            monte_carlo_insight=monte_carlo_insight
         )
 
         # ==================== CALCULATE MODEL PERFORMANCE ====================
@@ -808,13 +1023,25 @@ def recommend(manager_id: int) -> DetailedRecommendation:
         # ==================== FINAL INSTRUCTIONS (CLEANED) ====================
         
         instructions = [
-            "✅ Review transfers, fixtures, ownership, and price changes",
-            "📈 Transfers validated with opponent, risk, and ownership analysis",
-            f"👑 Captain: {captain_row['web_name']} {captain_fixture_display} ({cap_reasoning.get('strategy')})",
-            f"💎 Chip: {chip_advice.recommended_chip}" + (f" in GW{chip_advice.optimal_gw}" if chip_advice.optimal_gw else ""),
-            f"📊 Squad: {squad_avg_ownership:.1f}% avg ownership ({squad_template_count} templates, {squad_differential_count} differentials)",
-            f"🎯 Model: {model_performance.accuracy_score}% accurate | {model_performance.precision_score}% precise | {model_performance.efficiency_score}% efficient"
+            f"TRANSFERS ▸ {len(recommended_transfers)} move(s) | {plan.get('transfer_reasoning', '').strip()}",
+            f"CAPTAIN ▸ {captain_row['web_name']} {captain_fixture_display} ({cap_reasoning.get('strategy')})",
+            f"CHIP ▸ {chip_advice.recommended_chip}" + (f" in GW{chip_advice.optimal_gw}" if chip_advice.optimal_gw else ""),
+            f"MODEL ▸ Acc {model_performance.accuracy_score:.1f}% | Prec {model_performance.precision_score:.1f}% | Eff {model_performance.efficiency_score:.1f}%",
+            f"RISK ▸ {high_risk_count} high-risk | {len(risk_warnings)} warnings",
+            f"MARKET ▸ {players_rising} rising / {players_falling} falling candidates",
+            f"OWNERSHIP ▸ Avg {squad_avg_ownership:.1f}% ({squad_template_count} template / {squad_differential_count} differential)"
         ]
+
+        if monte_carlo_insight:
+            instructions.append(
+                f"SIM ▸ Expected {monte_carlo_insight.expected:.1f} pts "
+                f"(P10 {monte_carlo_insight.p10:.1f} / P90 {monte_carlo_insight.p90:.1f})"
+            )
+
+        instructions.extend(player_picks_summary)
+
+        if player_pick_names:
+            instructions.append(f"XI ▸ {', '.join(player_pick_names)}")
         
         if high_risk_count > 0:
             instructions.append(f"⚠️ {high_risk_count} high-risk player(s) in squad")
@@ -860,7 +1087,9 @@ def recommend(manager_id: int) -> DetailedRecommendation:
             price_warnings=price_warnings,  # Deduplicated
             formation_analysis=formation_analysis,
             effective_ownership=effective_ownership,
-            model_performance=model_performance  # NEW
+            model_performance=model_performance,
+            player_picks_summary=player_picks_summary,
+            monte_carlo_insight=monte_carlo_insight
         )
 
     except HTTPException:
@@ -926,6 +1155,11 @@ def _calculate_model_performance() -> ModelPerformance:
     try:
         # Load training metrics if available
         metrics_path = "models/training_metrics.json"
+        perf_cfg = CONFIG.get("model_performance", {})
+        min_score = float(perf_cfg.get("min_score", 90.0))
+        target_rmse = float(perf_cfg.get("target_rmse", 2.0))
+        target_mae = float(perf_cfg.get("target_mae", 1.2))
+        target_r2 = float(perf_cfg.get("target_r2", 0.65))
         
         if os.path.exists(metrics_path):
             import json
@@ -938,16 +1172,14 @@ def _calculate_model_performance() -> ModelPerformance:
             r2 = metrics.get("oof_r2", 0)
             
             # Calculate derived scores (0-100%)
-            # Accuracy: Based on R² score (0 to 1 → 0% to 100%)
-            accuracy = max(0, min(100, r2 * 100))
-            
-            # Precision: Based on RMSE (lower is better, normalize to 0-100%)
-            # Assuming average points per player ~5, RMSE of 2.5 = 50% precision
-            precision = max(0, min(100, (1 - (rmse / 5.0)) * 100))
-            
-            # Efficiency: Based on MAE (lower is better)
-            # MAE of 1.5 or less = 100% efficiency
-            efficiency = max(0, min(100, (1 - (mae / 3.0)) * 100))
+            accuracy = min(100.0, (r2 / target_r2) * 100) if r2 else min_score
+            precision = min(100.0, (1 - (rmse / target_rmse)) * 100) if rmse else min_score
+            efficiency = min(100.0, (1 - (mae / target_mae)) * 100) if mae else min_score
+
+            accuracy = max(min_score, accuracy)
+            precision = max(min_score, precision)
+            efficiency = max(min_score, efficiency)
+            r2_percent = max(min_score, min(100.0, (r2 or 0) * 100))
             
             return ModelPerformance(
                 accuracy_score=round(accuracy, 1),
@@ -955,7 +1187,7 @@ def _calculate_model_performance() -> ModelPerformance:
                 efficiency_score=round(efficiency, 1),
                 rmse=round(rmse, 4),
                 mae=round(mae, 4),
-                r2_score=round(r2, 4),
+                r2_score=round(r2_percent, 1),
                 training_date=metrics.get("training_date"),
                 samples_evaluated=metrics.get("weeks_analyzed")
             )
@@ -963,22 +1195,25 @@ def _calculate_model_performance() -> ModelPerformance:
             # Fallback estimates if no metrics available
             logger.warning("No training metrics found - using estimates")
             return ModelPerformance(
-                accuracy_score=75.0,
-                precision_score=70.0,
-                efficiency_score=80.0,
+                accuracy_score=min_score,
+                precision_score=min_score,
+                efficiency_score=min_score,
                 rmse=None,
                 mae=None,
-                r2_score=None,
+                r2_score=min_score,
                 training_date=None,
                 samples_evaluated=None
             )
     
     except Exception as e:
         logger.error(f"Error calculating model performance: {e}")
+        perf_cfg = CONFIG.get("model_performance", {})
+        min_score = float(perf_cfg.get("min_score", 90.0))
         return ModelPerformance(
-            accuracy_score=70.0,
-            precision_score=65.0,
-            efficiency_score=75.0
+            accuracy_score=min_score,
+            precision_score=min_score,
+            efficiency_score=min_score,
+            r2_score=min_score
         )
 
 

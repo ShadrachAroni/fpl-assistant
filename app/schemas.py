@@ -105,6 +105,9 @@ class TransferItem(BaseModel):
     out_price_fall_prob: Optional[float] = None
     in_price_rise_prob: Optional[float] = None
     price_warning: Optional[str] = None  # Price change urgency
+    multi_objective_gain: Optional[float] = None
+    regret_penalty: Optional[float] = None
+    template_penalty: Optional[float] = None
 
 
 class CaptaincyRecommendation(BaseModel):
@@ -163,6 +166,15 @@ class ChipAdvice(BaseModel):
     optimal_gw: Optional[int] = None
 
 
+class MonteCarloInsight(BaseModel):
+    """Monte Carlo simulation insights for upcoming GW."""
+    expected: float
+    median: float
+    p10: float
+    p90: float
+    variance: float
+
+
 class Summary(BaseModel):
     """Enhanced summary with ownership and price intelligence."""
     expected_points_next_gw: float
@@ -189,6 +201,10 @@ class Summary(BaseModel):
     squad_template_count: Optional[int] = None
     squad_differential_count: Optional[int] = None
     squad_average_ownership: Optional[float] = None
+    player_pick_summary: Optional[List[str]] = None
+    player_pick_names: Optional[List[str]] = None
+    monte_carlo_insight: Optional[MonteCarloInsight] = None
+
 
 class ModelPerformance(BaseModel):
     """Model performance metrics."""
@@ -217,3 +233,5 @@ class DetailedRecommendation(BaseModel):
     formation_analysis: Optional[FormationAnalysis] = None
     effective_ownership: Optional[EffectiveOwnership] = None
     model_performance: Optional[ModelPerformance] = None  # NEW
+    player_picks_summary: Optional[List[str]] = None
+    monte_carlo_insight: Optional[MonteCarloInsight] = None  # Mirror summary for quick access

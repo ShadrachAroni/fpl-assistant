@@ -110,9 +110,20 @@ def features_targets_from_df(
     if ownership_feats_in_model:
         logger.info(f"📊 Ownership/Price features in model: {len(ownership_feats_in_model)}")
     
-    # Validate critical features
-    critical_features = ["form", "minutes", "total_points"]
-    missing_critical = [f for f in critical_features if f not in feats and f not in exclude]
+    # Validate critical features (allow fallbacks like rolling metrics)
+    critical_feature_sets = [
+        ("form",),
+        ("minutes_roll4", "minutes"),
+        ("total_points_roll4", "total_points"),
+    ]
+    missing_critical = []
+    for feature_choices in critical_feature_sets:
+        if not any(
+            (feature in feats or feature in df.columns)
+            and feature not in exclude
+            for feature in feature_choices
+        ):
+            missing_critical.append(" / ".join(feature_choices))
     if missing_critical:
         logger.warning(f"⚠️ Missing critical features: {missing_critical}")
     
@@ -194,7 +205,8 @@ def train_lightgbm(
     early_stopping_rounds: int = 50,
     num_boost_round: int = 1000,
     exclude_risk_features: bool = False,
-    save_metrics: bool = True
+    save_metrics: bool = True,
+    train_position_models: bool = False
 ) -> Dict[str, Any]:
     """
     Train LightGBM model with comprehensive validation and intelligence features.
@@ -222,33 +234,111 @@ def train_lightgbm(
     if len(df) < 100:
         raise ValueError(f"❌ Insufficient training data: {len(df)} samples (need at least 100)")
     
-    # Extract features and target
-    X, y, feats = features_targets_from_df(
-        df, 
-        exclude_risk_from_features=exclude_risk_features
-    )
-    
-    # Validate features
-    if X.empty or y.empty:
-        raise ValueError("❌ Feature extraction failed - empty data")
-    
-    # Get player grouping for CV
-    if "player_id" in df.columns:
-        groups = df["player_id"].values
-    else:
-        logger.warning("⚠️ No player_id column - using sequential grouping")
-        groups = np.arange(len(df)) % n_splits
-    
+    target_col = "target_next_points"
+
+    def _prepare_training_data(dataframe: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, List[str], np.ndarray]:
+        X_local, y_local, feats_local = features_targets_from_df(
+            dataframe,
+            exclude_risk_from_features=exclude_risk_features
+        )
+        if X_local.empty or y_local.empty:
+            raise ValueError("❌ Feature extraction failed - empty data")
+
+        if "player_id" in dataframe.columns:
+            groups_local = dataframe["player_id"].values
+        else:
+            logger.warning("⚠️ No player_id column - using sequential grouping")
+            groups_local = np.arange(len(dataframe)) % n_splits
+
+        return X_local, y_local, feats_local, groups_local
+
+    def _train_cv_model(
+        X_data: pd.DataFrame,
+        y_data: pd.Series,
+        groups_data: np.ndarray,
+        splits: int,
+        description: str = "GLOBAL"
+    ) -> Dict[str, Any]:
+
+        if splits < 2:
+            splits = 2
+
+        logger.info(f"\n{'='*80}")
+        logger.info(f"🔁 Training {description} model with {splits} folds")
+        logger.info(f"{'='*80}")
+        logger.info(f"📊 Dataset: {len(X_data)} samples | Target μ={y_data.mean():.2f} σ={y_data.std():.2f}")
+
+        gkf = GroupKFold(n_splits=splits)
+        local_models = []
+        oof = np.zeros(X_data.shape[0])
+        local_fold_metrics = []
+
+        for fold, (tr, va) in enumerate(gkf.split(X_data, y_data, groups_data)):
+            logger.info(f"🧩 {description} Fold {fold+1}/{splits}")
+
+            Xtr, Xva = X_data.iloc[tr], X_data.iloc[va]
+            ytr, yva = y_data.iloc[tr], y_data.iloc[va]
+
+            dtr = lgb.Dataset(Xtr, ytr)
+            dva = lgb.Dataset(Xva, yva)
+
+            model = lgb.train(
+                params=params_local,
+                train_set=dtr,
+                valid_sets=[dva],
+                num_boost_round=num_boost_round,
+                callbacks=[
+                    early_stopping(early_stopping_rounds, verbose=False),
+                    log_evaluation(100)
+                ]
+            )
+
+            preds = model.predict(Xva, num_iteration=model.best_iteration)
+            oof[va] = preds
+
+            fold_rmse = np.sqrt(mean_squared_error(yva, preds))
+            fold_mae = mean_absolute_error(yva, preds)
+            fold_r2 = r2_score(yva, preds)
+
+            local_fold_metrics.append({
+                "fold": fold + 1,
+                "rmse": fold_rmse,
+                "mae": fold_mae,
+                "r2": fold_r2,
+                "best_iteration": model.best_iteration,
+                "n_train": len(Xtr),
+                "n_valid": len(Xva),
+                "description": description
+            })
+
+            logger.info(f"   ✅ RMSE={fold_rmse:.4f} | MAE={fold_mae:.4f} | R²={fold_r2:.4f}")
+            local_models.append(model)
+
+        rmse = np.sqrt(mean_squared_error(y_data, oof))
+        mae = mean_absolute_error(y_data, oof)
+        r2_val = r2_score(y_data, oof)
+
+        logger.info(f"📊 {description} Performance: RMSE={rmse:.4f} | MAE={mae:.4f} | R²={r2_val:.4f}")
+
+        return {
+            "models": local_models,
+            "oof_preds": oof,
+            "fold_metrics": local_fold_metrics,
+            "rmse": rmse,
+            "mae": mae,
+            "r2": r2_val
+        }
+
+    # Prepare training data
+    X, y, feats, groups = _prepare_training_data(df)
     logger.info(f"📊 Training data: {len(df)} records | {len(feats)} features | {n_splits} folds")
-    logger.info(f"🎯 Target: mean={y.mean():.2f}, std={y.std():.2f}, range=[{y.min():.1f}, {y.max():.1f}]")
-    
-    # Validate target distribution
+
     if y.std() < 0.1:
         logger.warning("⚠️ Target has very low variance - model may struggle")
-    
+
     # Default parameters optimized for FPL
     if params is None:
-        params = {
+        params_local = {
             "objective": "regression",
             "metric": "rmse",
             "learning_rate": 0.05,
@@ -265,100 +355,17 @@ def train_lightgbm(
         }
         logger.info("🔧 Using default LightGBM parameters")
     else:
+        params_local = params
         logger.info("🔧 Using custom LightGBM parameters")
-    
-    # Cross-validation setup
-    gkf = GroupKFold(n_splits=n_splits)
-    models = []
-    oof_preds = np.zeros(X.shape[0])
-    
-    # Metrics tracking
-    fold_metrics = []
-    
-    # Training loop
-    for fold, (tr, va) in enumerate(gkf.split(X, y, groups)):
-        logger.info(f"{'='*80}")
-        logger.info(f"🧩 FOLD {fold+1}/{n_splits}")
-        logger.info(f"{'='*80}")
-        
-        Xtr, Xva = X.iloc[tr], X.iloc[va]
-        ytr, yva = y.iloc[tr], y.iloc[va]
-        
-        logger.info(f"   Train: {len(Xtr)} samples | Valid: {len(Xva)} samples")
-        logger.info(f"   Train target: mean={ytr.mean():.2f}, std={ytr.std():.2f}")
-        logger.info(f"   Valid target: mean={yva.mean():.2f}, std={yva.std():.2f}")
-        
-        # Create datasets
-        dtr = lgb.Dataset(Xtr, ytr)
-        dva = lgb.Dataset(Xva, yva)
-        
-        # Train model
-        model = lgb.train(
-            params=params,
-            train_set=dtr,
-            valid_sets=[dva],
-            num_boost_round=num_boost_round,
-            callbacks=[
-                early_stopping(early_stopping_rounds, verbose=False),
-                log_evaluation(100)
-            ]
-        )
-        
-        # Predictions
-        preds = model.predict(Xva, num_iteration=model.best_iteration)
-        oof_preds[va] = preds
-        
-        # Calculate metrics
-        fold_rmse = np.sqrt(mean_squared_error(yva, preds))
-        fold_mae = mean_absolute_error(yva, preds)
-        fold_r2 = r2_score(yva, preds)
-        
-        fold_metrics.append({
-            "fold": fold + 1,
-            "rmse": fold_rmse,
-            "mae": fold_mae,
-            "r2": fold_r2,
-            "best_iteration": model.best_iteration,
-            "n_train": len(Xtr),
-            "n_valid": len(Xva)
-        })
-        
-        logger.info(f"   ✅ Fold {fold+1} Results:")
-        logger.info(f"      RMSE: {fold_rmse:.4f}")
-        logger.info(f"      MAE:  {fold_mae:.4f}")
-        logger.info(f"      R²:   {fold_r2:.4f}")
-        logger.info(f"      Best iteration: {model.best_iteration}")
-        
-        models.append(model)
-    
-    # Overall metrics
-    logger.info("=" * 80)
-    logger.info("📊 OVERALL PERFORMANCE")
-    logger.info("=" * 80)
-    
-    global_rmse = mean_squared_error(y, oof_preds, squared=False)
-    global_mae = mean_absolute_error(y, oof_preds)
-    global_r2 = r2_score(y, oof_preds)
-    
-    logger.info(f"   Out-of-Fold RMSE: {global_rmse:.4f}")
-    logger.info(f"   Out-of-Fold MAE:  {global_mae:.4f}")
-    logger.info(f"   Out-of-Fold R²:   {global_r2:.4f}")
-    
-    # Calculate fold statistics
-    fold_rmse_mean = np.mean([m["rmse"] for m in fold_metrics])
-    fold_rmse_std = np.std([m["rmse"] for m in fold_metrics])
-    
-    logger.info(f"   Fold RMSE: {fold_rmse_mean:.4f} ± {fold_rmse_std:.4f}")
-    
-    # Performance assessment
-    if global_rmse < 2.0:
-        logger.info("   🎉 EXCELLENT performance (RMSE < 2.0)")
-    elif global_rmse < 3.0:
-        logger.info("   👍 GOOD performance (RMSE < 3.0)")
-    elif global_rmse < 4.0:
-        logger.info("   ⚡ ACCEPTABLE performance (RMSE < 4.0)")
-    else:
-        logger.warning("   ⚠️ Below target performance (RMSE > 4.0)")
+
+    # Train global model
+    global_result = _train_cv_model(X, y, groups, n_splits, "GLOBAL")
+    models = global_result["models"]
+    oof_preds = global_result["oof_preds"]
+    fold_metrics = global_result["fold_metrics"]
+    global_rmse = global_result["rmse"]
+    global_mae = global_result["mae"]
+    global_r2 = global_result["r2"]
     
     # Feature importance
     logger.info("=" * 80)
@@ -433,10 +440,54 @@ def train_lightgbm(
         "oof_mae": global_mae,
         "oof_r2": global_r2,
         "training_date": results["training_date"],
-        "params": params,
+        "params": params_local,
         "n_folds": n_splits,
         "feature_categories": results["feature_categories"]
     }
+
+    # Train position-specific models if requested
+    position_models_payload = {}
+    if train_position_models and "position" in df.columns:
+        logger.info("\n🧩 Training position-specific models...")
+        for position_label, subset in df.groupby("position"):
+            if len(subset) < max(150, n_splits * 40):
+                logger.info(f"   Skipping {position_label} (insufficient samples: {len(subset)})")
+                continue
+
+            subset = subset.copy()
+            if target_col not in subset.columns:
+                logger.info(f"   Skipping {position_label} - missing target column")
+                continue
+
+            X_pos = subset[feats].fillna(0)
+            y_pos = subset[target_col].fillna(0)
+            if "player_id" in subset.columns:
+                groups_pos = subset["player_id"].values
+            else:
+                groups_pos = np.arange(len(subset)) % n_splits
+
+            pos_splits = min(n_splits, max(2, len(subset) // 200))
+            pos_result = _train_cv_model(X_pos, y_pos, groups_pos, pos_splits, f"POS-{position_label}")
+
+            position_models_payload[position_label] = {
+                "models": pos_result["models"],
+                "n_folds": pos_splits,
+                "oof_rmse": pos_result["rmse"],
+                "oof_mae": pos_result["mae"],
+                "oof_r2": pos_result["r2"],
+            }
+
+        if position_models_payload:
+            results["position_models"] = {
+                pos: {
+                    "oof_rmse": data["oof_rmse"],
+                    "oof_mae": data["oof_mae"],
+                    "oof_r2": data["oof_r2"],
+                    "n_folds": data["n_folds"]
+                }
+                for pos, data in position_models_payload.items()
+            }
+            model_data["position_models"] = position_models_payload
     
     joblib.dump(model_data, MODEL_PATH)
     logger.info(f"   ✅ Model saved to {MODEL_PATH}")
@@ -479,7 +530,8 @@ def train_lightgbm(
 def optimize_hyperparameters(
     df: pd.DataFrame,
     n_trials: int = 50,
-    n_splits: int = 3
+    n_splits: int = 3,
+    train_kwargs: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     """
     Optimize LightGBM hyperparameters using Optuna.
@@ -548,8 +600,8 @@ def optimize_hyperparameters(
             )
             
             preds = model.predict(Xva, num_iteration=model.best_iteration)
-            rmse = mean_squared_error(yva, preds, squared=False)
-            rmse_scores.append(rmse)
+            mse = mean_squared_error(yva, preds)
+            rmse_scores.append(np.sqrt(mse))
         
         return np.mean(rmse_scores)
     
@@ -574,7 +626,8 @@ def optimize_hyperparameters(
         **study.best_params
     }
     
-    results = train_lightgbm(df, params=best_params)
+    train_kwargs = train_kwargs or {}
+    results = train_lightgbm(df, params=best_params, n_splits=n_splits, **train_kwargs)
     results["optimization_trials"] = n_trials
     results["best_params"] = study.best_params
     
@@ -632,7 +685,7 @@ def evaluate_model(
             for model in models
         ], axis=0)
         
-        test_rmse = mean_squared_error(y_test, test_preds, squared=False)
+        test_rmse = np.sqrt(mean_squared_error(y_test, test_preds))
         test_mae = mean_absolute_error(y_test, test_preds)
         test_r2 = r2_score(y_test, test_preds)
         

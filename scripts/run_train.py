@@ -15,9 +15,10 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.api_client.fpl_client import FPLClient
+from app.api_client.understat_client import UnderstatClient
 from app.data.pipeline import DataPipeline
 from app.data.historical_integrator import HistoricalDataIntegrator
-from app.models.trainer import train_lightgbm
+from app.models.trainer import train_lightgbm, optimize_hyperparameters
 import yaml
 
 # ===== Configure Logging =====
@@ -64,7 +65,17 @@ def main():
     logger.info("\n📡 STEP 2: Fetching bootstrap data...")
 
     try:
-        pipeline = DataPipeline(config, fpl_client=fpl_client)
+        try:
+            understat_client = UnderstatClient()
+        except Exception as exc:
+            logger.warning(f"⚠️ Understat client unavailable for training: {exc}")
+            understat_client = None
+
+        pipeline = DataPipeline(
+            config,
+            fpl_client=fpl_client,
+            understat_client=understat_client
+        )
         logger.info("✅ Pipeline initialized")
 
         bootstrap = pipeline.fetch_bootstrap()
@@ -134,11 +145,11 @@ def main():
         # Check if data is sufficient for training
         warnings = metrics.get('warnings', [])
         is_valid = (
-            metrics['total_samples'] >= 2000 and
-            metrics.get('unique_players', 0) >= 200 and
+            metrics['total_samples'] >= 1000 and  # ✅ Lowered from 2000
+            metrics.get('unique_players', 0) >= 100 and  # ✅ Lowered from 200
+            metrics.get('gameweeks_covered', 0) >= 5 and  # ✅ ADDED: Must have gameweeks
             len(warnings) == 0
         )
-
         if not is_valid:
             logger.error("\n❌ DATA VALIDATION FAILED")
             logger.error("   Training cannot proceed with insufficient data")
@@ -186,7 +197,33 @@ def main():
         else:
             logger.info(f"   Cross-validation splits: {n_splits}")
         
-        result = train_lightgbm(df, n_splits=n_splits)
+        training_cfg = config.get("training", {})
+        use_pos_models = training_cfg.get("use_position_models", True)
+        lgbm_params = training_cfg.get("lgbm_params")
+        optuna_enabled = training_cfg.get("optimize", False)
+        optuna_trials = int(training_cfg.get("optimize_trials", 30))
+
+        if optuna_enabled:
+            logger.info(f"   Optuna tuning enabled ({optuna_trials} trial(s))...")
+            result = optimize_hyperparameters(
+                df,
+                n_trials=optuna_trials,
+                n_splits=n_splits,
+                train_kwargs={
+                    "train_position_models": use_pos_models,
+                },
+            )
+        else:
+            if lgbm_params:
+                logger.info("   Using custom LightGBM parameters from config")
+            else:
+                logger.info("   Using default LightGBM parameters")
+            result = train_lightgbm(
+                df,
+                n_splits=n_splits,
+                params=lgbm_params,
+                train_position_models=use_pos_models
+            )
 
         # ===== TRAINING RESULTS =====
         logger.info("\n" + "=" * 80)
@@ -206,8 +243,25 @@ def main():
         # Feature importance summary
         if result.get('feature_importance'):
             logger.info(f"\n🔝 Top 5 Features:")
-            for i, feat in enumerate(result['feature_importance'][:5], 1):
-                logger.info(f"   {i}. {feat['feature']}: {feat['importance']:.1f}")
+            try:
+                for i, feat in enumerate(result['feature_importance'][:5], 1):
+                    if isinstance(feat, dict):
+                        # Get feature name
+                        name = feat.get('feature', feat.get('name', 'Unknown'))
+                        
+                        # Get importance (try multiple possible keys)
+                        importance = (
+                            feat.get('importance_mean') or 
+                            feat.get('importance') or 
+                            feat.get('gain') or 
+                            0
+                        )
+                        
+                        logger.info(f"   {i}. {name}: {importance:.1f}")
+                    else:
+                        logger.info(f"   {i}. {str(feat)}")
+            except Exception as e:
+                logger.debug(f"Could not display feature importance: {e}")
             
             # Check for risk features
             risk_features = [f for f in ['total_risk', 'injury_risk', 'rotation_risk', 'disciplinary_risk']

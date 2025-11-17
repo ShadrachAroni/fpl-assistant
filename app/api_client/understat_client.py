@@ -16,12 +16,33 @@ class UnderstatClient:
         self.loop = asyncio.get_event_loop()
         self.understat = Understat(self.loop)
 
+    def _fetch_players_stats(self, season: str):
+        """
+        Attempt to fetch player stats using whichever Understat API is available.
+        """
+        try:
+            if hasattr(self.understat, "get_players_stats"):
+                return self.loop.run_until_complete(
+                    self.understat.get_players_stats(season=season)
+                )
+
+            if hasattr(self.understat, "get_league_players"):
+                # Default to Premier League if league not specified elsewhere
+                return self.loop.run_until_complete(
+                    self.understat.get_league_players("EPL", season=season)
+                )
+
+            raise AttributeError("No compatible Understat players endpoint available")
+        except Exception as exc:
+            logger.warning(f"⚠️ Understat players stats fetch failed: {exc}")
+            return []
+
     def get_player_shot_data(self, player_name: str, season: str = "2024") -> List[Dict]:
         """
         Returns shot-by-shot data for a given player name and season.
         Player lookup by name; fuzzy matches may be required for duplicates.
         """
-        data = self.loop.run_until_complete(self.understat.get_players_stats(season=season))
+        data = self._fetch_players_stats(season=season)
         # get matching player
         matches = [p for p in data if p.get("title","").lower() == player_name.lower()]
         if not matches:
@@ -37,3 +58,9 @@ class UnderstatClient:
     def get_team_xg(self, team_name: str, season: str = "2024"):
         # Could be implemented via get_team_stats
         return self.loop.run_until_complete(self.understat.get_team_stats(team=team_name, season=season))
+
+    def get_all_players_stats(self, season: str = "2024") -> List[Dict]:
+        """
+        Bulk fetch of player-level season stats (xG, xA, chain, buildup, etc.).
+        """
+        return self._fetch_players_stats(season=season)
