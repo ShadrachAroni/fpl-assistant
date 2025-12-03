@@ -180,10 +180,30 @@ class Predictor:
         # 5. Clip negative predictions
         enhanced_preds = np.maximum(enhanced_preds, clip_min)
 
-        logger.debug(
-            f"✅ Generated predictions for {len(enhanced_preds)} players | "
-            f"Range: [{enhanced_preds.min():.2f}, {enhanced_preds.max():.2f}]"
+        # Diagnostic logging for prediction analysis
+        logger.info(
+            f"📊 Prediction Diagnostics: {len(enhanced_preds)} players | "
+            f"Range: [{enhanced_preds.min():.2f}, {enhanced_preds.max():.2f}] | "
+            f"Mean: {enhanced_preds.mean():.2f} | Median: {np.median(enhanced_preds):.2f} | "
+            f"Std: {enhanced_preds.std():.2f}"
         )
+        
+        # Log distribution percentiles
+        if len(enhanced_preds) > 0:
+            percentiles = np.percentile(enhanced_preds, [10, 25, 50, 75, 90])
+            logger.debug(
+                f"   Percentiles: P10={percentiles[0]:.2f}, P25={percentiles[1]:.2f}, "
+                f"P50={percentiles[2]:.2f}, P75={percentiles[3]:.2f}, P90={percentiles[4]:.2f}"
+            )
+            
+            # Count players in different point ranges
+            high_pred = (enhanced_preds >= 6.0).sum()
+            medium_pred = ((enhanced_preds >= 3.0) & (enhanced_preds < 6.0)).sum()
+            low_pred = (enhanced_preds < 3.0).sum()
+            logger.debug(
+                f"   Distribution: {high_pred} high (≥6pts), {medium_pred} medium (3-6pts), "
+                f"{low_pred} low (<3pts)"
+            )
 
         return enhanced_preds
 
@@ -340,64 +360,68 @@ class Predictor:
         """
         Apply comprehensive risk adjustment to predictions.
         
+        IMPROVED: Reduced severity to prevent over-penalization
         Risk factors:
-        - Total risk (max 30% penalty)
-        - Injury risk (extra 20% if >50%)
-        - Rotation risk (extra 15% if >70%)
-        - Disciplinary risk (extra 10% if >60%)
-        - Fatigue risk (extra 8% if >60%)
-        - Form drop risk (extra 5% if >70%)
+        - Total risk (max 20% penalty, reduced from 30%)
+        - Injury risk (extra 15% if >50%, reduced from 20%)
+        - Rotation risk (extra 10% if >70%, reduced from 15%)
+        - Disciplinary risk (extra 8% if >60%, reduced from 10%)
+        - Fatigue risk (extra 6% if >60%, reduced from 8%)
+        - Form drop risk (extra 5% if >70%, unchanged)
         """
         adjusted = predictions.copy()
 
-        # Base risk penalty (max 30%)
+        # Base risk penalty (max 20% - REDUCED from 30% to fix low predictions)
         if "total_risk" in df.columns:
             total_risk = df["total_risk"].fillna(0).values
-            risk_penalty = 1 - (total_risk * 0.30)
+            risk_penalty = 1 - (total_risk * 0.20)  # Reduced from 0.30
             adjusted = adjusted * risk_penalty
             
-            logger.debug(f"Applied base risk adjustment (avg penalty: {(1 - risk_penalty.mean())*100:.1f}%)")
+            avg_penalty_pct = (1 - risk_penalty.mean()) * 100
+            logger.debug(f"Applied base risk adjustment (avg penalty: {avg_penalty_pct:.1f}%)")
 
-        # Critical risk penalties
+        # Critical risk penalties (reduced severity)
         if "injury_risk" in df.columns:
             injury_mask = df["injury_risk"].fillna(0) > 0.5
             if injury_mask.any():
-                adjusted[injury_mask] *= 0.80  # -20% for high injury risk
+                adjusted[injury_mask] *= 0.85  # -15% for high injury risk (reduced from -20%)
                 logger.debug(f"Applied injury penalty to {injury_mask.sum()} players")
 
         if "rotation_risk" in df.columns:
             rotation_mask = df["rotation_risk"].fillna(0) > 0.7
             if rotation_mask.any():
-                adjusted[rotation_mask] *= 0.85  # -15% for rotation prone
+                adjusted[rotation_mask] *= 0.90  # -10% for rotation prone (reduced from -15%)
                 logger.debug(f"Applied rotation penalty to {rotation_mask.sum()} players")
 
         if "disciplinary_risk" in df.columns:
             disciplinary_mask = df["disciplinary_risk"].fillna(0) > 0.6
             if disciplinary_mask.any():
-                adjusted[disciplinary_mask] *= 0.90  # -10% for suspension risk
+                adjusted[disciplinary_mask] *= 0.92  # -8% for suspension risk (reduced from -10%)
                 logger.debug(f"Applied disciplinary penalty to {disciplinary_mask.sum()} players")
 
         if "fatigue_risk" in df.columns:
             fatigue_mask = df["fatigue_risk"].fillna(0) > 0.6
             if fatigue_mask.any():
-                adjusted[fatigue_mask] *= 0.92  # -8% for high fatigue
+                adjusted[fatigue_mask] *= 0.94  # -6% for high fatigue (reduced from -8%)
                 logger.debug(f"Applied fatigue penalty to {fatigue_mask.sum()} players")
 
         if "form_drop_risk" in df.columns:
             form_drop_mask = df["form_drop_risk"].fillna(0) > 0.7
             if form_drop_mask.any():
-                adjusted[form_drop_mask] *= 0.95  # -5% for severe form drop
+                adjusted[form_drop_mask] *= 0.95  # -5% for severe form drop (unchanged)
                 logger.debug(f"Applied form drop penalty to {form_drop_mask.sum()} players")
 
         return adjusted
 
     def _apply_form_weighting(self, predictions: np.ndarray, df: pd.DataFrame) -> np.ndarray:
         """
-        Apply form-based weighting to predictions.
+        Apply enhanced form-based weighting with recency bias.
         
-        Recent form (last 3 GWs) can boost or penalize predictions:
-        - Form >8.0: +10% boost
-        - Form <4.0: -10% penalty
+        IMPROVED: More aggressive form weighting to better reflect recent performance
+        - Form >8.0: +15% boost (increased from +10%)
+        - Form <4.0: -15% penalty (increased from -10%)
+        - Form 7.0-8.0: +5% boost
+        - Form 4.0-5.0: -5% penalty
         - Linear scaling between
         """
         if "form" not in df.columns:
@@ -405,14 +429,32 @@ class Predictor:
 
         form = df["form"].fillna(7.5).values
         
-        # Form multiplier (range: 0.9 to 1.1)
-        form_multiplier = 1 + (form - 7.5) * 0.02
-        form_multiplier = np.clip(form_multiplier, 0.9, 1.1)
+        # Enhanced form multiplier with recency bias (range: 0.85 to 1.15)
+        # More aggressive than before to better capture form impact
+        form_multiplier = np.where(
+            form >= 8.0,
+            1.15,  # +15% for excellent form
+            np.where(
+                form >= 7.0,
+                1.0 + (form - 7.0) * 0.15,  # +0% to +15% for good form
+                np.where(
+                    form >= 5.0,
+                    1.0 + (form - 7.5) * 0.04,  # Linear scaling for average form
+                    np.where(
+                        form >= 4.0,
+                        0.95 + (form - 4.0) * 0.05,  # -5% to 0% for poor form
+                        0.85  # -15% for very poor form
+                    )
+                )
+            )
+        )
+        form_multiplier = np.clip(form_multiplier, 0.85, 1.15)
 
         adjusted = predictions * form_multiplier
 
         logger.debug(
-            f"Applied form weighting (avg multiplier: {form_multiplier.mean():.3f})"
+            f"Applied enhanced form weighting (avg multiplier: {form_multiplier.mean():.3f}, "
+            f"range: [{form_multiplier.min():.3f}, {form_multiplier.max():.3f}])"
         )
 
         return adjusted

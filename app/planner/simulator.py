@@ -89,11 +89,14 @@ class TransferSimulator:
         
         # Transfer risk config
         risk_cfg = sim_cfg.get("transfer_risk", {})
-        self.min_gain_free = float(risk_cfg.get("min_gain_for_free_transfer", 1.0))
-        self.min_gain_hit = float(risk_cfg.get("min_gain_for_hit", 6.0))
+        self.base_min_gain_free = float(risk_cfg.get("min_gain_for_free_transfer", 1.0))
+        self.base_min_gain_hit = float(risk_cfg.get("min_gain_for_hit", 6.0))
         self.extra_transfer_mult = float(risk_cfg.get("extra_transfer_multiplier", 1.5))
         self.allow_aggressive = risk_cfg.get("allow_aggressive_transfers", True)
         self.underperform_threshold = float(risk_cfg.get("underperformance_threshold", 45))
+        
+        # Calculate dynamic thresholds based on manager performance
+        self.min_gain_free, self.min_gain_hit = self._calculate_dynamic_thresholds()
         
         # NEW: Price change thresholds
         self.value_hold_threshold = 0.5  # Hold players with >50% rise probability
@@ -130,6 +133,62 @@ class TransferSimulator:
             f"✅ Simulator: {len(self.current)} players | £{self.bank:.1f}m bank | "
             f"{self.free_transfers} FT | Horizon={self.horizon} GWs"
         )
+    
+    def _calculate_dynamic_thresholds(self) -> Tuple[float, float]:
+        """
+        Calculate dynamic transfer thresholds based on manager performance and context.
+        
+        IMPROVED: Thresholds adjust based on:
+        - Manager rank (more aggressive if behind)
+        - Gameweek number (more aggressive early season)
+        - Recent performance (more aggressive if underperforming)
+        - Squad value (more aggressive with high-value squad)
+        """
+        min_gain_free = self.base_min_gain_free
+        min_gain_hit = self.base_min_gain_hit
+        
+        # Get manager performance metrics
+        manager_perf = self.manager_performance or {}
+        overall_rank = manager_perf.get("overall_rank", 1000000)
+        recent_avg = manager_perf.get("recent_average_points", 50.0)
+        squad_value = sum(self.current.get("now_cost", pd.Series([0])).fillna(0)) / 10.0
+        
+        # Factor 1: Manager rank (behind = more aggressive)
+        if overall_rank > 500000:  # Bottom 50%
+            min_gain_free *= 0.7  # Reduce threshold by 30%
+            min_gain_hit *= 0.8   # Reduce threshold by 20%
+        elif overall_rank > 100000:  # Bottom 10%
+            min_gain_free *= 0.85
+            min_gain_hit *= 0.9
+        
+        # Factor 2: Gameweek number (early season = more aggressive)
+        if self.next_gw <= 10:  # First 10 GWs
+            min_gain_free *= 0.8
+            min_gain_hit *= 0.85
+        elif self.next_gw <= 20:  # First half
+            min_gain_free *= 0.9
+            min_gain_hit *= 0.95
+        
+        # Factor 3: Recent performance (underperforming = more aggressive)
+        if recent_avg < self.underperform_threshold:
+            min_gain_free *= 0.75
+            min_gain_hit *= 0.8
+        
+        # Factor 4: Squad value (high value = more aggressive, can afford risks)
+        if squad_value > 100.0:  # High-value squad
+            min_gain_free *= 0.9
+            min_gain_hit *= 0.95
+        
+        # Ensure minimum thresholds
+        min_gain_free = max(0.3, min_gain_free)  # Never below 0.3
+        min_gain_hit = max(3.0, min_gain_hit)    # Never below 3.0
+        
+        logger.debug(
+            f"Dynamic thresholds: Free={min_gain_free:.2f} (base={self.base_min_gain_free:.2f}), "
+            f"Hit={min_gain_hit:.2f} (base={self.base_min_gain_hit:.2f})"
+        )
+        
+        return min_gain_free, min_gain_hit
 
     def _build_fixture_difficulty_map_horizon(self) -> Dict[int, Dict[int, int]]:
         """Build team -> fixture difficulty for next N gameweeks."""
@@ -523,6 +582,22 @@ class TransferSimulator:
             same_position["predicted_gain"] = same_position["risk_adjusted_score"] - weak_risk_adj
             same_position["cost_diff"] = same_position["now_cost"] - weak_selling_price
             
+            # NEW: Multi-GW gain (next 3 GWs for better planning)
+            same_position["multi_gw_gain"] = same_position.apply(
+                lambda row: self._calculate_multi_gw_gain(
+                    weak_player, row, gw, min(3, self.horizon)
+                ),
+                axis=1
+            )
+            
+            # NEW: Fixture run improvement (next 3-5 GWs)
+            same_position["fixture_run_improvement"] = same_position.apply(
+                lambda row: self._calculate_fixture_run_improvement(
+                    weak_player, row, gw, min(5, self.horizon)
+                ),
+                axis=1
+            )
+            
             # NEW: Add ownership differential value
             same_position["ownership_differential"] = (
                 same_position.get("selected_by_percent", 0) - 
@@ -533,6 +608,13 @@ class TransferSimulator:
             same_position["price_value"] = (
                 same_position.get("price_rise_probability", 0) * 0.1 -  # Potential gain
                 weak_opportunity_cost  # Potential loss from keeping weak player
+            )
+            
+            # NEW: Long-term value score (not just next GW)
+            same_position["long_term_value"] = (
+                same_position["multi_gw_gain"] * 0.4 +  # Multi-GW gains
+                same_position["fixture_run_improvement"] * 0.3 +  # Fixture runs
+                same_position["predicted_gain"] * 0.3  # Immediate gain
             )
 
             for _, candidate in same_position.iterrows():
@@ -559,12 +641,19 @@ class TransferSimulator:
                 weak_ownership = float(weak_player.get("selected_by_percent", 0))
                 regret_penalty = self._calculate_transfer_regret(weak_player, candidate)
                 
-                # Calculate ENHANCED net gain (includes price changes)
+                # Calculate ENHANCED net gain (includes price changes, multi-GW, fixture runs)
                 template_penalty = self._calculate_template_penalty(cand_ownership)
+                multi_gw_gain = float(candidate.get("multi_gw_gain", predicted_gain))
+                fixture_improvement = float(candidate.get("fixture_run_improvement", 0))
+                long_term_value = float(candidate.get("long_term_value", predicted_gain))
+                
+                # Enhanced net gain calculation
                 net_gain = (
-                    predicted_gain +
-                    (multi_gain * 0.5) +
-                    (price_value * 5) -
+                    predicted_gain * 0.4 +  # Immediate gain (40%)
+                    multi_gw_gain * 0.3 +   # Multi-GW gains (30%)
+                    fixture_improvement * 0.2 +  # Fixture run improvement (20%)
+                    (multi_gain * 0.5) * 0.05 +  # Multi-objective (5%)
+                    (price_value * 5) * 0.05 -   # Price value (5%)
                     template_penalty -
                     regret_penalty
                 )
@@ -620,6 +709,9 @@ class TransferSimulator:
                     "price_warning": price_warning,
                     "predicted_gain": predicted_gain,
                     "multi_objective_gain": multi_gain,
+                    "multi_gw_gain": multi_gw_gain,
+                    "fixture_run_improvement": fixture_improvement,
+                    "long_term_value": long_term_value,
                     "cost_diff": cost_diff,
                     "net_gain": net_gain,
                     "regret_penalty": regret_penalty,
@@ -642,6 +734,76 @@ class TransferSimulator:
 
         return potential_transfers[:self.max_transfers * 2]
 
+    def _calculate_multi_gw_gain(
+        self, 
+        player_out: pd.Series, 
+        player_in: pd.Series, 
+        start_gw: int, 
+        horizon: int
+    ) -> float:
+        """
+        Calculate cumulative gain over multiple gameweeks.
+        
+        IMPROVED: Considers next N gameweeks with horizon decay.
+        """
+        total_gain = 0.0
+        
+        for i in range(horizon):
+            gw = start_gw + i
+            decay = (1 - 0.05) ** i  # 5% decay per GW
+            
+            # Get predictions for this GW
+            out_pred_col = f"pred_gw{gw}"
+            in_pred_col = f"pred_gw{gw}"
+            
+            out_pred = float(player_out.get(out_pred_col, player_out.get("form", 0) * 0.5))
+            in_pred = float(player_in.get(in_pred_col, player_in.get("form", 0) * 0.5))
+            
+            gw_gain = (in_pred - out_pred) * decay
+            total_gain += gw_gain
+        
+        return total_gain
+    
+    def _calculate_fixture_run_improvement(
+        self,
+        player_out: pd.Series,
+        player_in: pd.Series,
+        start_gw: int,
+        horizon: int
+    ) -> float:
+        """
+        Calculate fixture run improvement over next N gameweeks.
+        
+        IMPROVED: Evaluates fixture difficulty swings.
+        """
+        out_fixtures = []
+        in_fixtures = []
+        
+        for i in range(horizon):
+            gw = start_gw + i
+            decay = (1 - 0.05) ** i
+            
+            # Get fixture difficulties
+            fixture_map = self.fixture_diff_by_gw.get(gw, {})
+            
+            out_team = int(player_out.get("team", 0))
+            in_team = int(player_in.get("team", 0))
+            
+            out_diff = fixture_map.get(out_team, self.DEFAULT_FIXTURE_DIFFICULTY)
+            in_diff = fixture_map.get(in_team, self.DEFAULT_FIXTURE_DIFFICULTY)
+            
+            # Lower difficulty = better (easier fixtures)
+            # Improvement = (out_diff - in_diff) * decay
+            improvement = (out_diff - in_diff) * decay
+            out_fixtures.append(out_diff)
+            in_fixtures.append(in_diff)
+        
+        # Calculate average improvement
+        avg_improvement = sum([(out_fixtures[i] - in_fixtures[i]) * ((1 - 0.05) ** i) 
+                              for i in range(len(out_fixtures))]) / max(len(out_fixtures), 1)
+        
+        return avg_improvement
+    
     def _calculate_price_change_impact(self, player: pd.Series) -> float:
         """
         Calculate price change impact for a player.

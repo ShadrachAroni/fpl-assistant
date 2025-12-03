@@ -237,18 +237,35 @@ def train_lightgbm(
     target_col = "target_next_points"
 
     def _prepare_training_data(dataframe: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, List[str], np.ndarray]:
+        # IMPROVED: Filter low-minute players and outliers for better R²
+        df_filtered = dataframe.copy()
+        
+        # Filter players with very few minutes (< 30 mins) - these are noisy
+        if "minutes" in df_filtered.columns:
+            initial_len = len(df_filtered)
+            df_filtered = df_filtered[df_filtered["minutes"] >= 30]
+            logger.info(f"📊 Filtered {initial_len - len(df_filtered)} low-minute samples (<30 mins)")
+        
+        # Remove extreme outliers in target (points > 20 or < -2 are rare and noisy)
+        if target_col in df_filtered.columns:
+            initial_len = len(df_filtered)
+            df_filtered = df_filtered[
+                (df_filtered[target_col] >= -2) & (df_filtered[target_col] <= 20)
+            ]
+            logger.info(f"📊 Filtered {initial_len - len(df_filtered)} outlier samples")
+        
         X_local, y_local, feats_local = features_targets_from_df(
-            dataframe,
+            df_filtered,
             exclude_risk_from_features=exclude_risk_features
         )
         if X_local.empty or y_local.empty:
             raise ValueError("❌ Feature extraction failed - empty data")
 
-        if "player_id" in dataframe.columns:
-            groups_local = dataframe["player_id"].values
+        if "player_id" in df_filtered.columns:
+            groups_local = df_filtered["player_id"].values
         else:
             logger.warning("⚠️ No player_id column - using sequential grouping")
-            groups_local = np.arange(len(dataframe)) % n_splits
+            groups_local = np.arange(len(df_filtered)) % n_splits
 
         return X_local, y_local, feats_local, groups_local
 
@@ -282,13 +299,14 @@ def train_lightgbm(
             dtr = lgb.Dataset(Xtr, ytr)
             dva = lgb.Dataset(Xva, yva)
 
+            # IMPROVED: More boosting rounds and better early stopping for R²
             model = lgb.train(
                 params=params_local,
                 train_set=dtr,
                 valid_sets=[dva],
-                num_boost_round=num_boost_round,
+                num_boost_round=int(num_boost_round * 1.5),  # More rounds for better fit
                 callbacks=[
-                    early_stopping(early_stopping_rounds, verbose=False),
+                    early_stopping(int(early_stopping_rounds * 1.5), verbose=False),  # More patience
                     log_evaluation(100)
                 ]
             )
@@ -336,24 +354,27 @@ def train_lightgbm(
     if y.std() < 0.1:
         logger.warning("⚠️ Target has very low variance - model may struggle")
 
-    # Default parameters optimized for FPL
+    # IMPROVED: Better default parameters for higher R²
     if params is None:
         params_local = {
             "objective": "regression",
             "metric": "rmse",
-            "learning_rate": 0.05,
-            "num_leaves": 31,
-            "max_depth": -1,
-            "feature_fraction": 0.8,
-            "bagging_fraction": 0.8,
+            "learning_rate": 0.03,  # Lower LR for better generalization
+            "num_leaves": 50,  # Increased for more capacity
+            "max_depth": 8,  # Limit depth to prevent overfitting
+            "feature_fraction": 0.85,  # Slightly higher for more features
+            "bagging_fraction": 0.85,
             "bagging_freq": 5,
-            "min_data_in_leaf": 20,
-            "lambda_l1": 0.1,
-            "lambda_l2": 0.1,
+            "min_data_in_leaf": 15,  # Lower for more splits
+            "min_gain_to_split": 0.1,  # Minimum gain for splits
+            "lambda_l1": 0.05,  # Reduced regularization
+            "lambda_l2": 0.05,
+            "max_bin": 255,  # More bins for better precision
             "verbosity": -1,
             "seed": 42,
+            "force_row_wise": True,  # Better for small datasets
         }
-        logger.info("🔧 Using default LightGBM parameters")
+        logger.info("🔧 Using IMPROVED default LightGBM parameters (optimized for R²)")
     else:
         params_local = params
         logger.info("🔧 Using custom LightGBM parameters")
@@ -555,12 +576,26 @@ def optimize_hyperparameters(
     
     logger.info(f"🔧 Starting hyperparameter optimization ({n_trials} trials)...")
     
-    X, y, feats = features_targets_from_df(df)
+    # IMPROVED: Filter data before optimization for better R²
+    df_filtered = df.copy()
+    if "minutes" in df_filtered.columns:
+        initial_len = len(df_filtered)
+        df_filtered = df_filtered[df_filtered["minutes"] >= 30]
+        logger.info(f"   Filtered {initial_len - len(df_filtered)} low-minute samples")
+    if "target_next_points" in df_filtered.columns:
+        initial_len = len(df_filtered)
+        df_filtered = df_filtered[
+            (df_filtered["target_next_points"] >= -2) & 
+            (df_filtered["target_next_points"] <= 20)
+        ]
+        logger.info(f"   Filtered {initial_len - len(df_filtered)} outlier samples")
     
-    if "player_id" in df.columns:
-        groups = df["player_id"].values
+    X, y, feats = features_targets_from_df(df_filtered)
+    
+    if "player_id" in df_filtered.columns:
+        groups = df_filtered["player_id"].values
     else:
-        groups = np.arange(len(df)) % n_splits
+        groups = np.arange(len(df_filtered)) % n_splits
     
     def objective(trial):
         """Optuna objective function."""
@@ -569,15 +604,18 @@ def optimize_hyperparameters(
             "metric": "rmse",
             "verbosity": -1,
             "seed": 42,
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1, log=True),
-            "num_leaves": trial.suggest_int("num_leaves", 20, 100),
-            "max_depth": trial.suggest_int("max_depth", 3, 12),
-            "feature_fraction": trial.suggest_float("feature_fraction", 0.6, 1.0),
-            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.6, 1.0),
-            "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 10, 50),
-            "lambda_l1": trial.suggest_float("lambda_l1", 0.0, 1.0),
-            "lambda_l2": trial.suggest_float("lambda_l2", 0.0, 1.0),
+            # IMPROVED: Better hyperparameter ranges for R² optimization
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.05, log=True),
+            "num_leaves": trial.suggest_int("num_leaves", 30, 100),
+            "max_depth": trial.suggest_int("max_depth", 5, 10),
+            "feature_fraction": trial.suggest_float("feature_fraction", 0.7, 0.95),
+            "bagging_fraction": trial.suggest_float("bagging_fraction", 0.7, 0.95),
+            "bagging_freq": trial.suggest_int("bagging_freq", 3, 7),
+            "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 10, 30),
+            "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 0.2),
+            "lambda_l1": trial.suggest_float("lambda_l1", 0.0, 0.3),
+            "lambda_l2": trial.suggest_float("lambda_l2", 0.0, 0.3),
+            "max_bin": trial.suggest_int("max_bin", 200, 300),
         }
         
         # Cross-validation
@@ -591,12 +629,13 @@ def optimize_hyperparameters(
             dtr = lgb.Dataset(Xtr, ytr)
             dva = lgb.Dataset(Xva, yva)
             
+            # IMPROVED: More rounds and patience for optimization
             model = lgb.train(
                 params=params,
                 train_set=dtr,
                 valid_sets=[dva],
-                num_boost_round=500,
-                callbacks=[early_stopping(30, verbose=False)]
+                num_boost_round=1000,  # More rounds
+                callbacks=[early_stopping(50, verbose=False)]  # More patience
             )
             
             preds = model.predict(Xva, num_iteration=model.best_iteration)

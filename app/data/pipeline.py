@@ -339,6 +339,12 @@ class DataPipeline:
         # Model-ready derived signals
         df = self._apply_model_signal_features(df)
         
+        # === NEW: POSITION-SPECIFIC & CONTEXTUAL FEATURES ===
+        df = self._enrich_with_position_specific_features(df)
+        df = self._enrich_with_team_statistics(df)
+        df = self._enrich_with_expected_minutes(df)
+        df = self._enrich_with_clean_sheet_probability(df)
+        
         logger.debug(f"Built enhanced players_df: {len(df)} players with {len(df.columns)} features")
         
         return df
@@ -353,37 +359,70 @@ class DataPipeline:
 
     def _load_rotation_prone_metadata(self) -> Dict[str, Dict[str, Any]]:
         """
-        Load rotation-prone metadata from the monitor cache if available.
-        Falls back to static config list otherwise.
+        AUTOMATICALLY load rotation-prone metadata from the monitor cache.
+        Falls back to static config list only if cache is unavailable.
+        
+        IMPROVED: Fully automatic detection - manual config is fallback only.
+        The rotation monitor automatically identifies rotation-prone teams based on
+        recent lineup volatility, so manual entries are no longer needed.
         """
         monitor_cfg = self.rotation_monitor_cfg or {}
         cache_path = Path(monitor_cfg.get("cache_path", "data/rotation_watch.json"))
         fallback_teams = self.risk_cfg.get("rotation_prone_teams", [])
         metadata: Dict[str, Dict[str, Any]] = {}
+        auto_detected_count = 0
 
+        # PRIORITY 1: Load from automatic rotation monitor (preferred)
         if cache_path.exists():
             try:
                 with cache_path.open("r", encoding="utf-8") as fh:
                     payload = json.load(fh)
 
+                # Load ALL teams with their rotation scores (not just prone ones)
+                # This allows for more nuanced risk assessment
                 for entry in payload.get("teams", []):
-                    if entry.get("is_rotation_prone"):
-                        team_name = entry.get("team_name")
-                        if team_name:
-                            metadata[team_name] = entry
+                    team_name = entry.get("team_name")
+                    if team_name:
+                        rotation_score = entry.get("rotation_score", 0.0)
+                        is_prone = entry.get("is_rotation_prone", False)
+                        
+                        # Include all teams with rotation data, not just prone ones
+                        # This allows for gradient risk assessment
+                        metadata[team_name] = {
+                            **entry,
+                            "source": "automatic_detection",
+                            "rotation_score": float(rotation_score),
+                            "is_rotation_prone": bool(is_prone)
+                        }
+                        
+                        if is_prone:
+                            auto_detected_count += 1
+                            
+                logger.info(
+                    f"✅ Loaded rotation data for {len(metadata)} teams "
+                    f"({auto_detected_count} rotation-prone) from automatic detection"
+                )
+                
             except Exception as exc:
                 logger.warning(f"⚠️ Rotation monitor cache load failed: {exc}")
 
+        # PRIORITY 2: Fallback to manual config only if cache unavailable
         if not metadata and fallback_teams:
             fallback_score = float(monitor_cfg.get("fallback_rotation_score", 0.45))
             metadata = {
                 team: {
                     "team_name": team,
                     "rotation_score": fallback_score,
+                    "is_rotation_prone": True,
                     "source": "config_fallback",
+                    "note": "Manual fallback - consider running rotation monitor"
                 }
                 for team in fallback_teams
             }
+            logger.warning(
+                f"⚠️ Using manual rotation-prone teams from config (fallback). "
+                f"Run rotation monitor for automatic detection."
+            )
 
         return metadata
 
@@ -391,17 +430,25 @@ class DataPipeline:
         """
         Map a team name to the rotation risk multiplier contributed by
         manager-level tinkering.
+        
+        IMPROVED: Uses automatic rotation scores from rotation monitor.
+        Returns gradient risk (0.0-1.0) instead of binary, allowing
+        more nuanced risk assessment.
         """
         entry = self.rotation_prone_managers.get(team_name)
         if not entry:
             return 0.0
 
+        # Use actual rotation score from automatic detection
         score = float(
             entry.get(
                 "rotation_score",
                 self.rotation_monitor_cfg.get("fallback_rotation_score", 0.4),
             )
         )
+        
+        # Return gradient score (0.0-1.0) for more nuanced risk
+        # Higher score = more rotation prone
         return max(0.0, min(1.0, score))
     
     def _enrich_with_ownership_intelligence(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -750,6 +797,68 @@ class DataPipeline:
             df["defensive_xg_delta"] = (expected_goals_conceded - df.get("goals_conceded", 0)).clip(-5, 5)
             df["attacking_fixture_delta"] = df["goal_contrib_per90"] * (5 - fixture_diff)
 
+            # ========================================
+            # NEW: INTERACTION FEATURES (IMPROVED)
+            # ========================================
+            # Form × Fixture interaction (key predictor)
+            df["form_x_fixture"] = form * (5 - fixture_diff)
+            
+            # Ownership × Form interaction (template players with form)
+            ownership_pct = pd.to_numeric(df.get("selected_by_percent", 0), errors="coerce").fillna(0)
+            df["ownership_x_form"] = (ownership_pct / 100.0) * form
+            
+            # Price × Value interaction
+            price = pd.to_numeric(df.get("now_cost", 0), errors="coerce").fillna(0) / 10.0
+            df["price_x_points_per_million"] = price * df.get("points_per_million", 0)
+            
+            # Risk × Expected points interaction
+            total_risk = pd.to_numeric(df.get("total_risk", 0), errors="coerce").fillna(0)
+            df["risk_x_form"] = total_risk * form
+            
+            # ========================================
+            # NEW: PENALTY TAKER STATUS
+            # ========================================
+            # Penalty taker (1st choice = 1.0, 2nd = 0.5, etc.)
+            penalties_order = pd.to_numeric(df.get("penalties_order"), errors="coerce")
+            df["is_penalty_taker"] = (penalties_order == 1).astype(float)
+            df["penalty_taker_priority"] = (1.0 / (penalties_order.fillna(99) + 1)).clip(0, 1)
+            
+            # ========================================
+            # NEW: TREND FEATURES (if rolling data available)
+            # ========================================
+            # Form trend (increasing/decreasing)
+            form_roll4 = pd.to_numeric(df.get("form_roll4", form), errors="coerce").fillna(form)
+            df["form_trend"] = form - form_roll4  # Positive = improving, negative = declining
+            
+            # Minutes trend
+            minutes_roll4 = pd.to_numeric(df.get("minutes_roll4", minutes), errors="coerce").fillna(minutes)
+            df["minutes_trend"] = minutes - minutes_roll4
+            
+            # Points trend
+            total_points_roll4 = pd.to_numeric(df.get("total_points_roll4", total_points), errors="coerce").fillna(total_points)
+            df["points_trend"] = total_points - total_points_roll4
+            
+            # ========================================
+            # NEW: RELATIVE FEATURES (vs position average)
+            # ========================================
+            if "position" in df.columns:
+                position = df["position"]
+                for pos in ["GK", "DEF", "MID", "FWD"]:
+                    pos_mask = position == pos
+                    if pos_mask.any():
+                        pos_form_mean = form[pos_mask].mean()
+                        pos_price_mean = price[pos_mask].mean()
+                        
+                        df.loc[pos_mask, "form_vs_position_avg"] = form[pos_mask] - pos_form_mean
+                        df.loc[pos_mask, "price_vs_position_avg"] = price[pos_mask] - pos_price_mean
+                
+                # Fill missing
+                df["form_vs_position_avg"] = df.get("form_vs_position_avg", 0).fillna(0)
+                df["price_vs_position_avg"] = df.get("price_vs_position_avg", 0).fillna(0)
+            else:
+                df["form_vs_position_avg"] = 0.0
+                df["price_vs_position_avg"] = 0.0
+
         except Exception as exc:
             logger.debug(f"Model signal feature enrichment failed: {exc}")
         finally:
@@ -766,6 +875,21 @@ class DataPipeline:
                 "defensive_actions_per90",
                 "defensive_xg_delta",
                 "attacking_fixture_delta",
+                # New interaction features
+                "form_x_fixture",
+                "ownership_x_form",
+                "price_x_points_per_million",
+                "risk_x_form",
+                # New penalty features
+                "is_penalty_taker",
+                "penalty_taker_priority",
+                # New trend features
+                "form_trend",
+                "minutes_trend",
+                "points_trend",
+                # New relative features
+                "form_vs_position_avg",
+                "price_vs_position_avg",
             ]
             for col in model_cols:
                 if col not in df.columns:
@@ -1760,6 +1884,250 @@ class DataPipeline:
                 congested.update(teams)
         return congested
 
+    def _enrich_with_position_specific_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add position-specific features for better modeling.
+        
+        Features:
+        - DEF/GK: Clean sheet probability, saves per game, defensive actions
+        - MID/FWD: Goal threat, assist potential, big chances
+        """
+        try:
+            if "position" not in df.columns:
+                return df
+            
+            position = df["position"]
+            
+            # DEF/GK specific features
+            defensive_mask = position.isin(["DEF", "GK"])
+            if defensive_mask.any():
+                # Clean sheet rate (will be enhanced by clean sheet probability function)
+                clean_sheets = pd.to_numeric(df.get("clean_sheets", 0), errors="coerce").fillna(0)
+                appearances = pd.to_numeric(df.get("appearances", 1), errors="coerce").fillna(1)
+                df.loc[defensive_mask, "clean_sheet_rate"] = (
+                    clean_sheets[defensive_mask] / appearances[defensive_mask].replace(0, 1)
+                ).fillna(0)
+                
+                # Saves per game (GK)
+                gk_mask = position == "GK"
+                saves = pd.to_numeric(df.get("saves", 0), errors="coerce").fillna(0)
+                if gk_mask.any():
+                    df.loc[gk_mask, "saves_per_game"] = (
+                        saves[gk_mask] / appearances[gk_mask].replace(0, 1)
+                    ).fillna(0)
+                else:
+                    df["saves_per_game"] = 0.0
+                
+                # Bonus points tendency (defenders get bonus more often)
+                bonus = pd.to_numeric(df.get("bonus", 0), errors="coerce").fillna(0)
+                df.loc[defensive_mask, "bonus_points_tendency"] = (
+                    bonus[defensive_mask] / appearances[defensive_mask].replace(0, 1)
+                ).fillna(0)
+            
+            # MID/FWD specific features
+            attacking_mask = position.isin(["MID", "FWD"])
+            if attacking_mask.any():
+                # Goal threat (goals + expected goals)
+                goals = pd.to_numeric(df.get("goals_scored", 0), errors="coerce").fillna(0)
+                xg = pd.to_numeric(df.get("expected_goals", 0), errors="coerce").fillna(0)
+                appearances = pd.to_numeric(df.get("appearances", 1), errors="coerce").fillna(1)
+                
+                df.loc[attacking_mask, "goal_threat_score"] = (
+                    (goals[attacking_mask] + xg[attacking_mask]) / appearances[attacking_mask].replace(0, 1)
+                ).fillna(0)
+                
+                # Assist potential
+                assists = pd.to_numeric(df.get("assists", 0), errors="coerce").fillna(0)
+                xa = pd.to_numeric(df.get("expected_assists", 0), errors="coerce").fillna(0)
+                df.loc[attacking_mask, "assist_potential_score"] = (
+                    (assists[attacking_mask] + xa[attacking_mask]) / appearances[attacking_mask].replace(0, 1)
+                ).fillna(0)
+                
+                # Big chances (inferred from goals vs xG)
+                big_chances = (goals[attacking_mask] - xg[attacking_mask]).clip(0, None)
+                df.loc[attacking_mask, "big_chances_created_estimate"] = big_chances.fillna(0)
+            
+            # Fill missing values
+            for col in ["clean_sheet_rate", "saves_per_game", "bonus_points_tendency", 
+                       "goal_threat_score", "assist_potential_score", "big_chances_created_estimate"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+                else:
+                    df[col] = df[col].fillna(0.0)
+            
+            logger.debug("Position-specific features added")
+            
+        except Exception as e:
+            logger.debug(f"Position-specific features failed: {e}")
+            # Ensure columns exist
+            for col in ["clean_sheet_rate", "saves_per_game", "bonus_points_tendency",
+                       "goal_threat_score", "assist_potential_score", "big_chances_created_estimate"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+        
+        return df
+    
+    def _enrich_with_team_statistics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Add team-level statistics for better context.
+        
+        Features:
+        - Team form (recent results)
+        - Team goals scored/conceded
+        - Team clean sheet rate
+        """
+        try:
+            if "team" not in df.columns or self.bootstrap is None:
+                return df
+            
+            # Aggregate team statistics
+            team_stats = {}
+            
+            # Calculate team-level metrics from player data
+            for team_id in df["team"].unique():
+                team_players = df[df["team"] == team_id]
+                if team_players.empty:
+                    continue
+                
+                # Team form (average player form)
+                team_form = team_players.get("form", pd.Series([7.5])).mean()
+                
+                # Team goals scored (sum of player goals)
+                team_goals = team_players.get("goals_scored", pd.Series([0])).sum()
+                
+                # Team goals conceded (from defenders/GK perspective)
+                team_goals_conceded = team_players.get("goals_conceded", pd.Series([0])).max()  # Same for all team players
+                
+                # Team clean sheets (from defenders/GK)
+                team_clean_sheets = team_players.get("clean_sheets", pd.Series([0])).max()
+                
+                # Team appearances (for rate calculations)
+                team_appearances = team_players.get("appearances", pd.Series([1])).max()
+                
+                team_stats[team_id] = {
+                    "team_form": float(team_form) if pd.notnull(team_form) else 7.5,
+                    "team_goals_scored": float(team_goals),
+                    "team_goals_conceded": float(team_goals_conceded),
+                    "team_clean_sheets": float(team_clean_sheets),
+                    "team_clean_sheet_rate": float(team_clean_sheets / max(team_appearances, 1)),
+                    "team_appearances": float(team_appearances)
+                }
+            
+            # Map team statistics to players
+            df["team_form"] = df["team"].map(lambda x: team_stats.get(x, {}).get("team_form", 7.5))
+            df["team_goals_scored"] = df["team"].map(lambda x: team_stats.get(x, {}).get("team_goals_scored", 0))
+            df["team_goals_conceded"] = df["team"].map(lambda x: team_stats.get(x, {}).get("team_goals_conceded", 0))
+            df["team_clean_sheet_rate"] = df["team"].map(lambda x: team_stats.get(x, {}).get("team_clean_sheet_rate", 0))
+            
+            logger.debug("Team statistics added")
+            
+        except Exception as e:
+            logger.debug(f"Team statistics enrichment failed: {e}")
+            # Ensure columns exist
+            for col in ["team_form", "team_goals_scored", "team_goals_conceded", "team_clean_sheet_rate"]:
+                if col not in df.columns:
+                    df[col] = 0.0 if "rate" in col else 7.5 if "form" in col else 0.0
+        
+        return df
+    
+    def _enrich_with_expected_minutes(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Predict expected minutes for next gameweek based on recent starts.
+        
+        Features:
+        - expected_minutes_next_gw
+        - minutes_consistency_score
+        - rotation_risk_score (based on minutes variance)
+        """
+        try:
+            minutes = pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0)
+            starts = pd.to_numeric(df.get("starts", 0), errors="coerce").fillna(0)
+            appearances = pd.to_numeric(df.get("appearances", 1), errors="coerce").fillna(1)
+            
+            # Expected minutes based on recent starts
+            # If started recently, expect to start again
+            start_rate = starts / appearances.replace(0, 1)
+            df["expected_minutes_next_gw"] = (start_rate * 90).clip(0, 90).fillna(0)
+            
+            # Minutes consistency (lower variance = more consistent)
+            # Use rolling minutes if available, otherwise use current minutes
+            minutes_roll4 = pd.to_numeric(df.get("minutes_roll4", minutes), errors="coerce").fillna(minutes)
+            minutes_std = pd.to_numeric(df.get("minutes_roll4_std", pd.Series([0] * len(df))), errors="coerce").fillna(0)
+            
+            # Consistency score (0-1, higher = more consistent)
+            # Lower std = higher consistency
+            max_std = 45  # Max reasonable std (half a game)
+            df["minutes_consistency_score"] = (1 - (minutes_std / max_std)).clip(0, 1).fillna(0.5)
+            
+            # Rotation risk score (inverse of consistency)
+            df["rotation_risk_score"] = 1 - df["minutes_consistency_score"]
+            
+            logger.debug("Expected minutes features added")
+            
+        except Exception as e:
+            logger.debug(f"Expected minutes enrichment failed: {e}")
+            # Ensure columns exist
+            for col in ["expected_minutes_next_gw", "minutes_consistency_score", "rotation_risk_score"]:
+                if col not in df.columns:
+                    df[col] = 0.0 if "score" in col else 60.0
+        
+        return df
+    
+    def _enrich_with_clean_sheet_probability(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate clean sheet probability for DEF/GK players.
+        
+        Based on:
+        - Team defensive strength
+        - Opponent attacking strength
+        - Home/away advantage
+        - Recent clean sheet rate
+        """
+        try:
+            if "position" not in df.columns:
+                return df
+            
+            defensive_mask = df["position"].isin(["DEF", "GK"])
+            if not defensive_mask.any():
+                df["clean_sheet_probability"] = 0.0
+                return df
+            
+            # Base clean sheet rate from team
+            team_cs_rate = df.get("team_clean_sheet_rate", pd.Series([0.2])).fillna(0.2)
+            
+            # Opponent strength (fixture difficulty)
+            fixture_diff = pd.to_numeric(df.get("fixture_difficulty", 3), errors="coerce").fillna(3)
+            
+            # Adjust for fixture difficulty (easier = higher CS prob)
+            # Difficulty 1-2: +20%, Difficulty 3: baseline, Difficulty 4-5: -20%
+            difficulty_multiplier = np.where(
+                fixture_diff <= 2, 1.2,
+                np.where(fixture_diff >= 4, 0.8, 1.0)
+            )
+            
+            # Home advantage (+10% for home games)
+            is_home = df.get("is_home", pd.Series([True])).fillna(True).astype(bool)
+            home_multiplier = np.where(is_home, 1.1, 0.9)
+            
+            # Player's personal clean sheet rate
+            player_cs_rate = df.get("clean_sheet_rate", pd.Series([0.2])).fillna(0.2)
+            
+            # Combined probability
+            base_prob = (team_cs_rate * 0.6 + player_cs_rate * 0.4)  # Weight team more
+            adjusted_prob = base_prob * difficulty_multiplier * home_multiplier
+            
+            df.loc[defensive_mask, "clean_sheet_probability"] = adjusted_prob[defensive_mask].clip(0, 1)
+            df.loc[~defensive_mask, "clean_sheet_probability"] = 0.0
+            
+            logger.debug("Clean sheet probability added")
+            
+        except Exception as e:
+            logger.debug(f"Clean sheet probability enrichment failed: {e}")
+            if "clean_sheet_probability" not in df.columns:
+                df["clean_sheet_probability"] = 0.0
+        
+        return df
+    
     def _calculate_age_years(self, dob: pd.Timestamp) -> Optional[float]:
         """Calculate age in years from date of birth."""
         if pd.isna(dob):
@@ -2113,8 +2481,22 @@ class DataPipeline:
         # Enrich with training features
         df = self._enrich_training_features(df)
         
-        # Create target variable
+        # IMPROVED: Create target variable with better filtering for R²
         df["target_next_points"] = df.groupby("player_id")["total_points"].shift(-1)
+        
+        # Filter: Only include players who played meaningful minutes (>30) in next GW
+        if "minutes" in df.columns:
+            df["minutes_next"] = df.groupby("player_id")["minutes"].shift(-1)
+            # Keep only samples where player played meaningful minutes next GW
+            initial_len = len(df)
+            df = df[(df["minutes_next"] >= 30) | (df["minutes_next"].isna())]
+            logger.debug(f"Filtered {initial_len - len(df)} samples with <30 mins next GW")
+        
+        # Remove extreme outliers (points > 20 are very rare and noisy)
+        initial_len = len(df)
+        df = df[(df["target_next_points"] >= -2) & (df["target_next_points"] <= 20)]
+        logger.debug(f"Filtered {initial_len - len(df)} outlier samples")
+        
         df.dropna(subset=["target_next_points"], inplace=True)
         
         return df

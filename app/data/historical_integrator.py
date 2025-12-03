@@ -526,6 +526,28 @@ class HistoricalDataIntegrator:
         if f"total_points_roll{rolling_window}" in df.columns:
             df["form"] = df[f"total_points_roll{rolling_window}"]
         
+        # IMPROVED: Add lag features (previous GW performance) for better R²
+        lag_features = ["total_points", "minutes", "goals_scored", "assists", "form"]
+        for feat in lag_features:
+            if feat in df.columns:
+                # Lag 1 (previous GW)
+                df[f"{feat}_lag1"] = df.groupby("player_id")[feat].shift(1).fillna(0)
+                # Lag 2 (2 GWs ago)
+                df[f"{feat}_lag2"] = df.groupby("player_id")[feat].shift(2).fillna(0)
+        
+        # IMPROVED: Add momentum features (change from previous GW)
+        if "total_points_lag1" in df.columns and "total_points" in df.columns:
+            df["points_momentum"] = df["total_points"] - df["total_points_lag1"]
+            df["points_momentum_2gw"] = df["total_points"] - df.get("total_points_lag2", 0)
+        
+        # IMPROVED: Add trend features (increasing/decreasing)
+        if f"total_points_roll{rolling_window}" in df.columns:
+            # Compare recent form to longer-term average
+            df["points_trend"] = (
+                df[f"total_points_roll{rolling_window}"] - 
+                df.groupby("player_id")["total_points"].transform("mean")
+            ).fillna(0)
+        
         # ========================================
         # 4. REMOVE RAW CURRENT-GAMEWEEK FEATURES
         # ========================================

@@ -46,7 +46,9 @@ training:
   bayesian_form_confidence: 0.7
   use_position_models: true
   optimize: true
-  optimize_trials: 40
+  optimize_trials: 150  # IMPROVED: Increased to 150 for better R² optimization
+  num_boost_round: 2000  # IMPROVED: More boosting rounds for better fit
+  early_stopping_rounds: 100  # IMPROVED: More patience for convergence
 
 understat:
   season: "2024"
@@ -127,8 +129,12 @@ simulation:
     suspension_risk_penalty: 0.10        # Extra 10% if disciplinary >60%
     fatigue_penalty: 0.08                # Extra 8% if fatigue >60%
     
-    # Rotation-prone managers (known for heavy rotation)
+    # Rotation-prone teams - AUTOMATIC DETECTION (fallback list below)
+    # ✅ The rotation_monitor automatically identifies rotation-prone teams based on
+    #    recent lineup volatility. Manual entries below are FALLBACK ONLY.
+    #    Run: python -m scripts.rotation_watch to update automatic detection
     rotation_prone_teams:
+      # Fallback teams (only used if rotation monitor cache unavailable)
       - "Manchester City"      # Guardiola - Pep roulette
       - "Chelsea"              # High rotation
       - "Liverpool"            # Slot era rotation
@@ -136,14 +142,14 @@ simulation:
       - "Brighton and Hove Albion"
       - "Newcastle United"
     rotation_monitor:
-      enabled: true
-      window_gameweeks: 5
-      starter_minutes: 55
-      prone_threshold: 0.4
+      enabled: true                    # Enable automatic rotation detection
+      window_gameweeks: 5             # Analyze last N gameweeks
+      starter_minutes: 55             # Minutes threshold for "starter"
+      prone_threshold: 0.4            # Rotation score ≥0.4 = rotation prone
       cache_path: "data/rotation_watch.json"
       summary_cache_dir: "data/cache/player_history"
-      summary_cache_hours: 6
-      fallback_rotation_score: 0.45
+      summary_cache_hours: 6          # Cache player history for 6 hours
+      fallback_rotation_score: 0.45  # Score used if cache unavailable
     
     # Yellow card suspension thresholds
     yellow_card_thresholds:

@@ -140,7 +140,12 @@ def main():
         
         # Use integrator's comprehensive validation
         metrics = integrator.validate_data_quality(df)
-        print(integrator.get_statistics_summary(df))
+        try:
+            summary = integrator.get_statistics_summary(df)
+            print(summary.encode('utf-8', errors='replace').decode('utf-8', errors='replace'))
+        except UnicodeEncodeError:
+            # Fallback: print without emojis
+            print(f"Training data: {len(df)} records, {len(df.columns)} features")
         
         # Check if data is sufficient for training
         warnings = metrics.get('warnings', [])
@@ -201,7 +206,9 @@ def main():
         use_pos_models = training_cfg.get("use_position_models", True)
         lgbm_params = training_cfg.get("lgbm_params")
         optuna_enabled = training_cfg.get("optimize", False)
-        optuna_trials = int(training_cfg.get("optimize_trials", 30))
+        optuna_trials = int(training_cfg.get("optimize_trials", 150))  # IMPROVED: Default 150
+        num_boost_round = int(training_cfg.get("num_boost_round", 2000))  # IMPROVED: More rounds
+        early_stopping_rounds = int(training_cfg.get("early_stopping_rounds", 100))  # IMPROVED: More patience
 
         if optuna_enabled:
             logger.info(f"   Optuna tuning enabled ({optuna_trials} trial(s))...")
@@ -211,18 +218,22 @@ def main():
                 n_splits=n_splits,
                 train_kwargs={
                     "train_position_models": use_pos_models,
+                    "num_boost_round": num_boost_round,
+                    "early_stopping_rounds": early_stopping_rounds
                 },
             )
         else:
             if lgbm_params:
                 logger.info("   Using custom LightGBM parameters from config")
             else:
-                logger.info("   Using default LightGBM parameters")
+                logger.info("   Using IMPROVED default LightGBM parameters (optimized for R²)")
             result = train_lightgbm(
                 df,
                 n_splits=n_splits,
                 params=lgbm_params,
-                train_position_models=use_pos_models
+                train_position_models=use_pos_models,
+                num_boost_round=num_boost_round,
+                early_stopping_rounds=early_stopping_rounds
             )
 
         # ===== TRAINING RESULTS =====
